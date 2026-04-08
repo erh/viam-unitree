@@ -1,8 +1,8 @@
 {
   "$schema": "https://dl.viam.dev/module.schema.json",
   "module_id": "erh:viam-unitree",
-  "visibility": "private",
-  "url": "",
+  "visibility": "public",
+  "url": "https://github.com/erh/viam-unitree",
   "description": "Viam module for the Unitree G1 humanoid robot",
   "applications": null,
   "markdown_link": "README.md",
