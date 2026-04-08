@@ -18,7 +18,7 @@ class ViamUnitreeRecipe(ConanFile):
     settings = "os", "compiler", "build_type", "arch"
 
     # Sources are located in the same place as this recipe, copy them to the recipe
-    exports_sources = "CMakeLists.txt", "src/*", "main.cpp", "meta.json"
+    exports_sources = "CMakeLists.txt", "src/*", "main.cpp", "meta.json", "*.md"
 
     def layout(self):
         cmake_layout(self)

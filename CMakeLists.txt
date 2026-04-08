@@ -23,6 +23,7 @@ FetchContent_MakeAvailable(unitree_sdk2)
 add_executable(viam-unitree
     main.cpp
     src/g1_base.cpp
+    src/g1_camera.cpp
 )
 
 target_include_directories(viam-unitree PUBLIC src)

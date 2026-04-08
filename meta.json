@@ -11,6 +11,11 @@
       "api": "rdk:component:base",
       "model": "erh:viam-unitree:g1-base",
       "description": "Base component for Unitree G1 locomotion"
+    },
+    {
+      "api": "rdk:component:camera",
+      "model": "erh:viam-unitree:g1-camera",
+      "description": "Camera component for Unitree G1 video"
     }
   ],
   "entrypoint": "bin/viam-unitree",
