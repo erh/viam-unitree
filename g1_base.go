@@ -58,19 +58,14 @@ func newG1Base(ctx context.Context, deps resource.Dependencies, conf resource.Co
 
 	logger.Infof("Initializing G1Base with network interface: %s", networkInterface)
 
-	if err := InitChannel(0, networkInterface); err != nil {
-		return nil, fmt.Errorf("channel init: %w", err)
+	if err := InitDDS(0, networkInterface); err != nil {
+		return nil, fmt.Errorf("DDS init: %w", err)
 	}
 
 	loco, err := NewLocoClient()
 	if err != nil {
-		return nil, fmt.Errorf("loco client create: %w", err)
+		return nil, fmt.Errorf("loco client: %w", err)
 	}
-	if err := loco.Init(); err != nil {
-		loco.Close()
-		return nil, fmt.Errorf("loco client init: %w", err)
-	}
-	loco.SetTimeout(10.0)
 
 	cancelCtx, cancelFn := context.WithCancel(context.Background())
 
@@ -99,7 +94,6 @@ func (b *g1Base) MoveStraight(ctx context.Context, distanceMm int, mmPerSec floa
 	vx := float32(direction * speedMps)
 
 	b.mu.Lock()
-	// Create a new cancel context for this movement.
 	b.cancelFn()
 	moveCtx, moveFn := context.WithCancel(context.Background())
 	b.cancelCtx = moveCtx
@@ -226,35 +220,34 @@ func (b *g1Base) DoCommand(ctx context.Context, cmd map[string]interface{}) (map
 		return map[string]interface{}{}, nil
 	}
 
-	var rc int
+	var err error
 	switch cmdStr {
 	case "stand_up":
-		rc = b.loco.StandUp()
+		_, err = b.loco.StandUp()
 	case "sit":
-		rc = b.loco.Sit()
-	case "squat":
-		rc = b.loco.Squat()
-	case "high_stand":
-		rc = b.loco.HighStand()
-	case "low_stand":
-		rc = b.loco.LowStand()
+		_, err = b.loco.Sit()
 	case "balance_stand":
-		rc = b.loco.BalanceStand()
+		_, err = b.loco.BalanceStand()
 	case "damp":
-		rc = b.loco.Damp()
-	case "zero_torque":
-		rc = b.loco.ZeroTorque()
-	case "wave_hand":
-		rc = b.loco.WaveHand()
-	case "start":
-		rc = b.loco.Start()
+		_, err = b.loco.Damp()
+	case "stand_down":
+		_, err = b.loco.StandDown()
+	case "rise_sit":
+		_, err = b.loco.RiseSit()
+	case "hello":
+		_, err = b.loco.Hello()
 	case "stop_move":
-		rc = b.loco.StopMove()
+		err = b.loco.StopMove()
 	default:
 		return map[string]interface{}{"error": "unknown command: " + cmdStr}, nil
 	}
 
-	return map[string]interface{}{"rc": float64(rc)}, nil
+	result := map[string]interface{}{"rc": 0.0}
+	if err != nil {
+		result["rc"] = -1.0
+		result["error"] = err.Error()
+	}
+	return result, nil
 }
 
 func (b *g1Base) Close(ctx context.Context) error {

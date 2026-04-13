@@ -53,17 +53,13 @@ func newG1Camera(ctx context.Context, deps resource.Dependencies, conf resource.
 
 	logger.Infof("Initializing G1Camera with network interface: %s", networkInterface)
 
-	if err := InitChannel(0, networkInterface); err != nil {
-		return nil, fmt.Errorf("channel init: %w", err)
+	if err := InitDDS(0, networkInterface); err != nil {
+		return nil, fmt.Errorf("DDS init: %w", err)
 	}
 
 	video, err := NewVideoClient()
 	if err != nil {
-		return nil, fmt.Errorf("video client create: %w", err)
-	}
-	if err := video.Init(); err != nil {
-		video.Close()
-		return nil, fmt.Errorf("video client init: %w", err)
+		return nil, fmt.Errorf("video client: %w", err)
 	}
 
 	logger.Info("G1Camera initialized successfully")
