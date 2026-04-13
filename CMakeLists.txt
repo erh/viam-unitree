@@ -1,14 +1,16 @@
 cmake_minimum_required(VERSION 3.25 FATAL_ERROR)
 
-project(viam-unitree
-    DESCRIPTION "Viam Unitree G1 Module"
+project(unitree-capi
+    DESCRIPTION "C wrapper around unitree_sdk2 for CGo"
     LANGUAGES CXX
 )
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
-
-find_package(viam-cpp-sdk CONFIG REQUIRED COMPONENTS viamsdk)
 
 include(FetchContent)
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -20,28 +22,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(unitree_sdk2)
 
-add_executable(viam-unitree
-    main.cpp
-    src/g1_base.cpp
-    src/g1_camera.cpp
-)
-
-target_include_directories(viam-unitree PUBLIC src)
-
-target_link_libraries(viam-unitree
-    viam-cpp-sdk::viamsdk
-    unitree_sdk2
-)
-
-install(
-    FILES meta.json
-    DESTINATION .
-)
-
-install(TARGETS viam-unitree)
-
-set(CPACK_PACKAGE_NAME "viam-unitree")
-set(CPACK_PACKAGE_FILE_NAME "module")
-set(CPACK_GENERATOR "TGZ")
-set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY 0)
-include(CPack)
+add_library(unitree_capi STATIC capi/unitree_capi.cpp)
+target_include_directories(unitree_capi PUBLIC ${CMAKE_SOURCE_DIR}/capi)
+target_link_libraries(unitree_capi PUBLIC unitree_sdk2)
