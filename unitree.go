@@ -295,3 +295,111 @@ func (v *VideoClient) Close() {
 		v.rpc = nil
 	}
 }
+
+// PointCloud2 is a Go view of a ROS2 sensor_msgs/PointCloud2 message.
+type PointCloud2 struct {
+	StampSec     int32
+	StampNanosec uint32
+	FrameID      string
+	Height       uint32
+	Width        uint32
+	Fields       []PointField
+	IsBigendian  bool
+	PointStep    uint32
+	RowStep      uint32
+	Data         []byte
+	IsDense      bool
+}
+
+// PointField describes one field in a PointCloud2 point record.
+type PointField struct {
+	Name     string
+	Offset   uint32
+	Datatype uint8
+	Count    uint32
+}
+
+// PointField datatype enum values (from sensor_msgs/PointField).
+const (
+	PointFieldInt8    uint8 = 1
+	PointFieldUint8   uint8 = 2
+	PointFieldInt16   uint8 = 3
+	PointFieldUint16  uint8 = 4
+	PointFieldInt32   uint8 = 5
+	PointFieldUint32  uint8 = 6
+	PointFieldFloat32 uint8 = 7
+	PointFieldFloat64 uint8 = 8
+)
+
+// LidarClient subscribes to a streaming PointCloud2 DDS topic.
+type LidarClient struct {
+	mu     sync.Mutex
+	reader C.dds_entity_t
+}
+
+// NewLidarClient creates a subscriber on the given DDS topic
+// (e.g. "rt/utlidar/cloud").
+func NewLidarClient(topic string) (*LidarClient, error) {
+	cTopic := C.CString(topic)
+	defer C.free(unsafe.Pointer(cTopic))
+
+	var reader C.dds_entity_t
+	rc := C.unitree_dds_subscribe(cTopic, 0 /* PointCloud2 */, &reader)
+	if rc != 0 {
+		return nil, fmt.Errorf("subscribe to %q failed (rc=%d)", topic, rc)
+	}
+	return &LidarClient{reader: reader}, nil
+}
+
+// Read blocks for up to timeoutMs waiting for the next point cloud.
+func (l *LidarClient) Read(timeoutMs int) (*PointCloud2, error) {
+	var raw C.unitree_pointcloud2_t
+	rc := C.unitree_dds_take_pointcloud2(l.reader, C.int(timeoutMs), &raw)
+	if rc != 0 {
+		return nil, fmt.Errorf("take pointcloud2 timed out")
+	}
+	defer C.unitree_pointcloud2_free(&raw)
+
+	pc := &PointCloud2{
+		StampSec:     int32(raw.stamp_sec),
+		StampNanosec: uint32(raw.stamp_nanosec),
+		Height:       uint32(raw.height),
+		Width:        uint32(raw.width),
+		IsBigendian:  raw.is_bigendian != 0,
+		PointStep:    uint32(raw.point_step),
+		RowStep:      uint32(raw.row_step),
+		IsDense:      raw.is_dense != 0,
+	}
+	if raw.frame_id != nil {
+		pc.FrameID = C.GoString(raw.frame_id)
+	}
+	if raw.fields._length > 0 && raw.fields._buffer != nil {
+		fields := unsafe.Slice((*C.unitree_point_field_t)(unsafe.Pointer(raw.fields._buffer)), int(raw.fields._length))
+		pc.Fields = make([]PointField, len(fields))
+		for i, f := range fields {
+			name := ""
+			if f.name != nil {
+				name = C.GoString(f.name)
+			}
+			pc.Fields[i] = PointField{
+				Name:     name,
+				Offset:   uint32(f.offset),
+				Datatype: uint8(f.datatype),
+				Count:    uint32(f.count),
+			}
+		}
+	}
+	if raw.data._length > 0 && raw.data._buffer != nil {
+		pc.Data = C.GoBytes(unsafe.Pointer(raw.data._buffer), C.int(raw.data._length))
+	}
+	return pc, nil
+}
+
+func (l *LidarClient) Close() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.reader != 0 {
+		C.unitree_dds_close_subscriber(l.reader)
+		l.reader = 0
+	}
+}

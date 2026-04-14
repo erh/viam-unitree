@@ -83,6 +83,52 @@ const dds_topic_descriptor_t unitree_response_desc = {
     .m_meta = ""
 };
 
+/* --- PointCloud2_ descriptor ---
+ *
+ * sensor_msgs::msg::dds_::PointCloud2_ contains a sequence of PointField
+ * structs. The CycloneDDS opcode for "sequence of struct" is:
+ *   [ADR|SEQ|STU, offset, sizeof(elem), (next_insn<<16) | elem_insn]
+ * where next_insn / elem_insn are offsets in uint32 units measured from
+ * the start of the SEQ opcode.
+ *
+ * The PointField element ops are inlined within the same array, between
+ * the SEQ opcode and the next field's opcode.
+ */
+static const uint32_t unitree_pointcloud2_ops[] = {
+    /* 0  */ DDS_OP_ADR | DDS_OP_TYPE_4BY | DDS_OP_FLAG_SGN, offsetof(unitree_pointcloud2_t, stamp_sec),
+    /* 2  */ DDS_OP_ADR | DDS_OP_TYPE_4BY,                   offsetof(unitree_pointcloud2_t, stamp_nanosec),
+    /* 4  */ DDS_OP_ADR | DDS_OP_TYPE_STR,                   offsetof(unitree_pointcloud2_t, frame_id),
+    /* 6  */ DDS_OP_ADR | DDS_OP_TYPE_4BY,                   offsetof(unitree_pointcloud2_t, height),
+    /* 8  */ DDS_OP_ADR | DDS_OP_TYPE_4BY,                   offsetof(unitree_pointcloud2_t, width),
+    /* 10 */ DDS_OP_ADR | DDS_OP_TYPE_SEQ | DDS_OP_SUBTYPE_STU, offsetof(unitree_pointcloud2_t, fields),
+    /* 12 */ sizeof(unitree_point_field_t),
+    /* 13 */ (14u << 16) | 5u,  /* next_insn=14 (skip to op 24), elem_insn=5 (jump to op 15) */
+    /* 14 */ DDS_OP_RTS,         /* return-to-sender for sequence (terminates element ops) */
+    /* 15 */ DDS_OP_ADR | DDS_OP_TYPE_STR,                   offsetof(unitree_point_field_t, name),
+    /* 17 */ DDS_OP_ADR | DDS_OP_TYPE_4BY,                   offsetof(unitree_point_field_t, offset),
+    /* 19 */ DDS_OP_ADR | DDS_OP_TYPE_1BY,                   offsetof(unitree_point_field_t, datatype),
+    /* 21 */ DDS_OP_ADR | DDS_OP_TYPE_4BY,                   offsetof(unitree_point_field_t, count),
+    /* 23 */ DDS_OP_RTS,         /* end of element ops */
+    /* 24 */ DDS_OP_ADR | DDS_OP_TYPE_BLN,                   offsetof(unitree_pointcloud2_t, is_bigendian),
+    /* 26 */ DDS_OP_ADR | DDS_OP_TYPE_4BY,                   offsetof(unitree_pointcloud2_t, point_step),
+    /* 28 */ DDS_OP_ADR | DDS_OP_TYPE_4BY,                   offsetof(unitree_pointcloud2_t, row_step),
+    /* 30 */ DDS_OP_ADR | DDS_OP_TYPE_SEQ | DDS_OP_SUBTYPE_1BY, offsetof(unitree_pointcloud2_t, data),
+    /* 32 */ DDS_OP_ADR | DDS_OP_TYPE_BLN,                   offsetof(unitree_pointcloud2_t, is_dense),
+    /* 34 */ DDS_OP_RTS
+};
+
+const dds_topic_descriptor_t unitree_pointcloud2_desc = {
+    .m_size = sizeof(unitree_pointcloud2_t),
+    .m_align = sizeof(uint32_t),
+    .m_flagset = DDS_TOPIC_NO_OPTIMIZE,
+    .m_nkeys = 0u,
+    .m_typename = "sensor_msgs::msg::dds_::PointCloud2_",
+    .m_keys = NULL,
+    .m_nops = sizeof(unitree_pointcloud2_ops) / sizeof(uint32_t),
+    .m_ops = unitree_pointcloud2_ops,
+    .m_meta = ""
+};
+
 /* --- DDS infrastructure --- */
 
 static dds_entity_t g_participant = 0;
@@ -224,6 +270,118 @@ void unitree_response_free(unitree_response_t *resp) {
         free(resp->binary._buffer);
         resp->binary._buffer = NULL;
     }
+}
+
+int unitree_dds_subscribe(const char *topic_name, int topic_type,
+                          dds_entity_t *reader_out) {
+    if (g_participant <= 0)
+        return -1;
+
+    const dds_topic_descriptor_t *desc = NULL;
+    switch (topic_type) {
+        case 0: desc = &unitree_pointcloud2_desc; break;
+        default: return -1;
+    }
+
+    dds_entity_t topic = dds_create_topic(g_participant, desc, topic_name, NULL, NULL);
+    if (topic < 0)
+        return -1;
+
+    /* Sensor data: BEST_EFFORT, KEEP_LAST(1) so we always get the freshest sample. */
+    dds_qos_t *qos = dds_create_qos();
+    dds_qset_reliability(qos, DDS_RELIABILITY_BEST_EFFORT, 0);
+    dds_qset_history(qos, DDS_HISTORY_KEEP_LAST, 1);
+    *reader_out = dds_create_reader(g_participant, topic, qos, NULL);
+    dds_delete_qos(qos);
+    if (*reader_out < 0)
+        return -1;
+
+    return 0;
+}
+
+int unitree_dds_take_pointcloud2(dds_entity_t reader, int timeout_ms,
+                                 unitree_pointcloud2_t *out) {
+    void *samples[1] = { NULL };
+    dds_sample_info_t infos[1];
+
+    dds_duration_t timeout = DDS_MSECS(timeout_ms);
+    dds_entity_t ws = dds_create_waitset(g_participant);
+    dds_entity_t cond = dds_create_readcondition(reader, DDS_ANY_STATE);
+    dds_waitset_attach(ws, cond, 0);
+
+    dds_return_t rc = dds_waitset_wait(ws, NULL, 0, timeout);
+    dds_waitset_detach(ws, cond);
+    dds_delete(cond);
+    dds_delete(ws);
+
+    if (rc <= 0)
+        return -1;
+
+    rc = dds_take(reader, samples, infos, 1, 1);
+    if (rc <= 0 || !infos[0].valid_data) {
+        if (rc > 0) dds_return_loan(reader, samples, rc);
+        return -1;
+    }
+
+    /* Deep-copy out so caller can free the loan. */
+    unitree_pointcloud2_t *src = (unitree_pointcloud2_t *)samples[0];
+    memset(out, 0, sizeof(*out));
+    out->stamp_sec     = src->stamp_sec;
+    out->stamp_nanosec = src->stamp_nanosec;
+    out->frame_id      = src->frame_id ? strdup(src->frame_id) : NULL;
+    out->height        = src->height;
+    out->width         = src->width;
+    out->is_bigendian  = src->is_bigendian;
+    out->point_step    = src->point_step;
+    out->row_step      = src->row_step;
+    out->is_dense      = src->is_dense;
+
+    if (src->fields._length > 0 && src->fields._buffer) {
+        out->fields._length  = src->fields._length;
+        out->fields._maximum = src->fields._length;
+        out->fields._buffer = (unitree_point_field_t *)calloc(
+            src->fields._length, sizeof(unitree_point_field_t));
+        for (uint32_t i = 0; i < src->fields._length; i++) {
+            out->fields._buffer[i].name = src->fields._buffer[i].name
+                ? strdup(src->fields._buffer[i].name) : NULL;
+            out->fields._buffer[i].offset   = src->fields._buffer[i].offset;
+            out->fields._buffer[i].datatype = src->fields._buffer[i].datatype;
+            out->fields._buffer[i].count    = src->fields._buffer[i].count;
+        }
+    }
+
+    if (src->data._length > 0 && src->data._buffer) {
+        out->data._length  = src->data._length;
+        out->data._maximum = src->data._length;
+        out->data._buffer  = (uint8_t *)malloc(src->data._length);
+        memcpy(out->data._buffer, src->data._buffer, src->data._length);
+    }
+
+    dds_return_loan(reader, samples, 1);
+    return 0;
+}
+
+void unitree_pointcloud2_free(unitree_pointcloud2_t *pc) {
+    if (pc->frame_id) { free(pc->frame_id); pc->frame_id = NULL; }
+    if (pc->fields._buffer) {
+        for (uint32_t i = 0; i < pc->fields._length; i++) {
+            if (pc->fields._buffer[i].name) free(pc->fields._buffer[i].name);
+        }
+        free(pc->fields._buffer);
+        pc->fields._buffer = NULL;
+        pc->fields._length = 0;
+    }
+    if (pc->data._buffer) {
+        free(pc->data._buffer);
+        pc->data._buffer = NULL;
+        pc->data._length = 0;
+    }
+}
+
+void unitree_dds_close_subscriber(dds_entity_t reader) {
+    dds_entity_t topic = (reader > 0) ? dds_get_topic(reader) : 0;
+    if (reader > 0) dds_delete(reader);
+    if (topic > 0) dds_delete(topic);
 }
 
 void unitree_dds_close_rpc(dds_entity_t writer, dds_entity_t reader) {

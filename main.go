@@ -12,5 +12,6 @@ func main() {
 	module.ModularMain(
 		resource.APIModel{API: base.API, Model: g1BaseModel},
 		resource.APIModel{API: camera.API, Model: g1CameraModel},
+		resource.APIModel{API: camera.API, Model: g1LidarModel},
 	)
 }
