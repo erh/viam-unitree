@@ -78,6 +78,9 @@ int unitree_dds_read_response(dds_entity_t reader, int timeout_ms,
 /* Free memory allocated inside a response by DDS deserialization. */
 void unitree_response_free(unitree_response_t *resp);
 
+/* Delete a writer/reader pair created by unitree_dds_create_rpc. */
+void unitree_dds_close_rpc(dds_entity_t writer, dds_entity_t reader);
+
 /* Shut down the DDS participant. */
 void unitree_dds_shutdown(void);
 

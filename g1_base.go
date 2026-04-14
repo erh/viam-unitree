@@ -263,5 +263,6 @@ func (b *g1Base) Close(ctx context.Context) error {
 
 	b.loco.StopMove()
 	b.loco.Close()
+	ShutdownDDS()
 	return nil
 }

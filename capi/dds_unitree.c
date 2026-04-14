@@ -226,8 +226,24 @@ void unitree_response_free(unitree_response_t *resp) {
     }
 }
 
+void unitree_dds_close_rpc(dds_entity_t writer, dds_entity_t reader) {
+    /* Capture the topic handles before deleting the writers/readers.
+       Topics are reference counted; we delete them so they don't accumulate
+       across module reconfigurations. */
+    dds_entity_t writer_topic = (writer > 0) ? dds_get_topic(writer) : 0;
+    dds_entity_t reader_topic = (reader > 0) ? dds_get_topic(reader) : 0;
+
+    if (writer > 0) dds_delete(writer);
+    if (reader > 0) dds_delete(reader);
+    if (writer_topic > 0) dds_delete(writer_topic);
+    if (reader_topic > 0 && reader_topic != writer_topic) dds_delete(reader_topic);
+}
+
 void unitree_dds_shutdown(void) {
     if (g_participant > 0) {
+        /* dds_delete on a participant cascades to all child entities and
+           sends DDS "participant gone" so remote endpoints don't wait for
+           the lease to time out. */
         dds_delete(g_participant);
         g_participant = 0;
     }

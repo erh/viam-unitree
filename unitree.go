@@ -56,20 +56,47 @@ const (
 	ApiGetImageSample int64 = 1001
 )
 
-// InitDDS initializes the DDS participant.
+// The DDS participant is process-global and shared by all components.
+// We refcount it so the participant stays alive while any component uses
+// it, and is cleanly torn down (notifying the robot) when the last
+// component closes.
+var (
+	ddsMu   sync.Mutex
+	ddsRefs int
+)
+
+// InitDDS initializes (or reuses) the global DDS participant.
+// Each call must be paired with a ShutdownDDS().
 func InitDDS(domainID int, networkInterface string) error {
-	cIface := C.CString(networkInterface)
-	defer C.free(unsafe.Pointer(cIface))
-	rc := C.unitree_dds_init(C.int(domainID), cIface)
-	if rc != 0 {
-		return fmt.Errorf("DDS init failed (rc=%d)", rc)
+	ddsMu.Lock()
+	defer ddsMu.Unlock()
+
+	if ddsRefs == 0 {
+		cIface := C.CString(networkInterface)
+		defer C.free(unsafe.Pointer(cIface))
+		rc := C.unitree_dds_init(C.int(domainID), cIface)
+		if rc != 0 {
+			return fmt.Errorf("DDS init failed (rc=%d)", rc)
+		}
 	}
+	ddsRefs++
 	return nil
 }
 
-// ShutdownDDS shuts down the DDS participant.
+// ShutdownDDS releases one reference on the global participant.
+// When the last reference is released, the participant is deleted and
+// the robot is notified immediately (no lease-timeout wait).
 func ShutdownDDS() {
-	C.unitree_dds_shutdown()
+	ddsMu.Lock()
+	defer ddsMu.Unlock()
+
+	if ddsRefs == 0 {
+		return
+	}
+	ddsRefs--
+	if ddsRefs == 0 {
+		C.unitree_dds_shutdown()
+	}
 }
 
 // RPCClient provides request/response communication over a DDS service topic.
@@ -91,6 +118,18 @@ func NewRPCClient(serviceName string) (*RPCClient, error) {
 		return nil, fmt.Errorf("create RPC for %q failed (rc=%d)", serviceName, rc)
 	}
 	return &RPCClient{writer: writer, reader: reader}, nil
+}
+
+// Close releases the writer/reader entities. Safe to call multiple times.
+func (c *RPCClient) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.writer == 0 && c.reader == 0 {
+		return
+	}
+	C.unitree_dds_close_rpc(c.writer, c.reader)
+	c.writer = 0
+	c.reader = 0
 }
 
 // Call sends an RPC request and waits for the response.
@@ -218,7 +257,12 @@ func (l *LocoClient) HighStand() (int, error)    { return 0, l.SetStandHeight(fl
 func (l *LocoClient) LowStand() (int, error)     { return 0, l.SetStandHeight(0) }
 func (l *LocoClient) WaveHand() (int, error)     { return 0, l.SetArmTask(0) }
 
-func (l *LocoClient) Close() {}
+func (l *LocoClient) Close() {
+	if l.rpc != nil {
+		l.rpc.Close()
+		l.rpc = nil
+	}
+}
 
 // VideoClient wraps the videohub service for camera capture.
 type VideoClient struct {
@@ -245,4 +289,9 @@ func (v *VideoClient) GetImage() ([]byte, error) {
 	return binary, nil
 }
 
-func (v *VideoClient) Close() {}
+func (v *VideoClient) Close() {
+	if v.rpc != nil {
+		v.rpc.Close()
+		v.rpc = nil
+	}
+}

@@ -134,5 +134,6 @@ func (c *g1Camera) DoCommand(ctx context.Context, cmd map[string]interface{}) (m
 
 func (c *g1Camera) Close(ctx context.Context) error {
 	c.video.Close()
+	ShutdownDDS()
 	return nil
 }
