@@ -150,9 +150,17 @@ func NewLocoClient() (*LocoClient, error) {
 
 // SetVelocity sends a velocity command. Duration is in seconds; pass a large
 // value (e.g. 864000) for "continuous" movement.
+//
+// vx is forward velocity (m/s, positive = forward), vy is lateral velocity
+// (m/s, positive = left), vyaw is yaw rate (rad/s, positive = counterclockwise).
+//
+// Note: the G1 robot's velocity-command JSON array is ordered
+// [lateral, forward, yaw] despite the C++ SDK's parameter naming suggesting
+// otherwise. We swap here so the Go-facing Move(vx, vy, vyaw) keeps
+// standard ROS REP-103 semantics (x=forward, y=left).
 func (l *LocoClient) SetVelocity(vx, vy, vyaw, duration float32) error {
 	params, _ := json.Marshal(map[string]interface{}{
-		"velocity": []float32{vx, vy, vyaw},
+		"velocity": []float32{vy, vx, vyaw},
 		"duration": duration,
 	})
 	_, _, err := l.rpc.Call(ApiLocoSetVelocity, string(params), 1000)
