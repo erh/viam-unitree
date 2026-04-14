@@ -226,16 +226,22 @@ func (b *g1Base) DoCommand(ctx context.Context, cmd map[string]interface{}) (map
 		_, err = b.loco.StandUp()
 	case "sit":
 		_, err = b.loco.Sit()
+	case "squat":
+		_, err = b.loco.Squat()
+	case "high_stand":
+		_, err = b.loco.HighStand()
+	case "low_stand":
+		_, err = b.loco.LowStand()
 	case "balance_stand":
 		_, err = b.loco.BalanceStand()
 	case "damp":
 		_, err = b.loco.Damp()
-	case "stand_down":
-		_, err = b.loco.StandDown()
-	case "rise_sit":
-		_, err = b.loco.RiseSit()
-	case "hello":
-		_, err = b.loco.Hello()
+	case "zero_torque":
+		_, err = b.loco.ZeroTorque()
+	case "wave_hand":
+		_, err = b.loco.WaveHand()
+	case "start":
+		_, err = b.loco.Start()
 	case "stop_move":
 		err = b.loco.StopMove()
 	default:

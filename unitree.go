@@ -24,18 +24,31 @@ import (
 	"unsafe"
 )
 
-// Unitree sport API IDs.
+// Unitree G1 sport (loco) API IDs.
+// See unitree_sdk2/include/unitree/robot/g1/loco/g1_loco_api.hpp
 const (
-	ApiDamp         int64 = 1001
-	ApiBalanceStand int64 = 1002
-	ApiStopMove     int64 = 1003
-	ApiStandUp      int64 = 1004
-	ApiStandDown    int64 = 1005
-	ApiEuler        int64 = 1007
-	ApiMove         int64 = 1008
-	ApiSit          int64 = 1009
-	ApiRiseSit      int64 = 1010
-	ApiHello        int64 = 1016
+	ApiLocoGetFsmID        int64 = 7001
+	ApiLocoGetFsmMode      int64 = 7002
+	ApiLocoGetBalanceMode  int64 = 7003
+	ApiLocoGetSwingHeight  int64 = 7004
+	ApiLocoGetStandHeight  int64 = 7005
+	ApiLocoSetFsmID        int64 = 7101
+	ApiLocoSetBalanceMode  int64 = 7102
+	ApiLocoSetSwingHeight  int64 = 7103
+	ApiLocoSetStandHeight  int64 = 7104
+	ApiLocoSetVelocity     int64 = 7105
+	ApiLocoSetArmTask      int64 = 7106
+	ApiLocoSetSpeedMode    int64 = 7107
+)
+
+// G1 FSM (Finite State Machine) IDs used with SetFsmId.
+const (
+	FsmZeroTorque  = 0
+	FsmDamp        = 1
+	FsmSquat       = 2
+	FsmSit         = 3
+	FsmStandUp     = 4
+	FsmStart       = 500
 )
 
 // Unitree video API IDs.
@@ -120,7 +133,9 @@ func (c *RPCClient) Call(apiID int64, paramsJSON string, timeoutMs int) (string,
 	return data, binary, nil
 }
 
-// LocoClient wraps the sport service for locomotion commands.
+// LocoClient wraps the G1 sport service for locomotion commands.
+// All methods use the G1-specific API IDs and JSON parameter formats
+// (these differ from the Go2 quadruped's API).
 type LocoClient struct {
 	rpc *RPCClient
 }
@@ -133,33 +148,67 @@ func NewLocoClient() (*LocoClient, error) {
 	return &LocoClient{rpc: rpc}, nil
 }
 
+// SetVelocity sends a velocity command. Duration is in seconds; pass a large
+// value (e.g. 864000) for "continuous" movement.
+func (l *LocoClient) SetVelocity(vx, vy, vyaw, duration float32) error {
+	params, _ := json.Marshal(map[string]interface{}{
+		"velocity": []float32{vx, vy, vyaw},
+		"duration": duration,
+	})
+	_, _, err := l.rpc.Call(ApiLocoSetVelocity, string(params), 1000)
+	return err
+}
+
+// Move issues a one-shot velocity command (1 second duration). Call repeatedly
+// at ~10Hz to maintain motion, or use SetVelocity with a longer duration.
 func (l *LocoClient) Move(vx, vy, vyaw float32) error {
-	params, _ := json.Marshal(map[string]float32{"vx": vx, "vy": vy, "vyaw": vyaw})
-	_, _, err := l.rpc.Call(ApiMove, string(params), 1000)
-	return err
+	return l.SetVelocity(vx, vy, vyaw, 1.0)
 }
 
+// StopMove halts locomotion.
 func (l *LocoClient) StopMove() error {
-	_, _, err := l.rpc.Call(ApiStopMove, "{}", 1000)
+	return l.SetVelocity(0, 0, 0, 1.0)
+}
+
+// SetFsmID transitions the robot's finite-state machine to the given state.
+func (l *LocoClient) SetFsmID(fsmID int) error {
+	params, _ := json.Marshal(map[string]int{"data": fsmID})
+	_, _, err := l.rpc.Call(ApiLocoSetFsmID, string(params), 10000)
 	return err
 }
 
-func (l *LocoClient) StandUp() (int, error)      { return l.simpleCall(ApiStandUp) }
-func (l *LocoClient) Sit() (int, error)           { return l.simpleCall(ApiSit) }
-func (l *LocoClient) BalanceStand() (int, error)   { return l.simpleCall(ApiBalanceStand) }
-func (l *LocoClient) Damp() (int, error)           { return l.simpleCall(ApiDamp) }
-func (l *LocoClient) StandDown() (int, error)      { return l.simpleCall(ApiStandDown) }
-func (l *LocoClient) RiseSit() (int, error)        { return l.simpleCall(ApiRiseSit) }
-func (l *LocoClient) Hello() (int, error)          { return l.simpleCall(ApiHello) }
-
-func (l *LocoClient) simpleCall(apiID int64) (int, error) {
-	data, _, err := l.rpc.Call(apiID, "{}", 10000)
-	if err != nil {
-		return -1, err
-	}
-	_ = data
-	return 0, nil
+// SetBalanceMode sets the balance mode (0=static, 1=continuous gait).
+func (l *LocoClient) SetBalanceMode(mode int) error {
+	params, _ := json.Marshal(map[string]int{"data": mode})
+	_, _, err := l.rpc.Call(ApiLocoSetBalanceMode, string(params), 10000)
+	return err
 }
+
+// SetStandHeight adjusts the standing height.
+func (l *LocoClient) SetStandHeight(height float32) error {
+	params, _ := json.Marshal(map[string]float32{"data": height})
+	_, _, err := l.rpc.Call(ApiLocoSetStandHeight, string(params), 10000)
+	return err
+}
+
+// SetArmTask triggers an arm task by ID (e.g. wave_hand=0, turn_wave=1).
+func (l *LocoClient) SetArmTask(taskID int) error {
+	params, _ := json.Marshal(map[string]int{"data": taskID})
+	_, _, err := l.rpc.Call(ApiLocoSetArmTask, string(params), 10000)
+	return err
+}
+
+// High-level convenience wrappers matching the C++ SDK's LocoClient API.
+func (l *LocoClient) ZeroTorque() (int, error)   { return 0, l.SetFsmID(FsmZeroTorque) }
+func (l *LocoClient) Damp() (int, error)         { return 0, l.SetFsmID(FsmDamp) }
+func (l *LocoClient) Squat() (int, error)        { return 0, l.SetFsmID(FsmSquat) }
+func (l *LocoClient) Sit() (int, error)          { return 0, l.SetFsmID(FsmSit) }
+func (l *LocoClient) StandUp() (int, error)      { return 0, l.SetFsmID(FsmStandUp) }
+func (l *LocoClient) Start() (int, error)        { return 0, l.SetFsmID(FsmStart) }
+func (l *LocoClient) BalanceStand() (int, error) { return 0, l.SetBalanceMode(0) }
+func (l *LocoClient) HighStand() (int, error)    { return 0, l.SetStandHeight(float32(^uint32(0))) }
+func (l *LocoClient) LowStand() (int, error)     { return 0, l.SetStandHeight(0) }
+func (l *LocoClient) WaveHand() (int, error)     { return 0, l.SetArmTask(0) }
 
 func (l *LocoClient) Close() {}
 
