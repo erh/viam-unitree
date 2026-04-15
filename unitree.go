@@ -27,35 +27,42 @@ import (
 // Unitree G1 sport (loco) API IDs.
 // See unitree_sdk2/include/unitree/robot/g1/loco/g1_loco_api.hpp
 const (
-	ApiLocoGetFsmID        int64 = 7001
-	ApiLocoGetFsmMode      int64 = 7002
-	ApiLocoGetBalanceMode  int64 = 7003
-	ApiLocoGetSwingHeight  int64 = 7004
-	ApiLocoGetStandHeight  int64 = 7005
-	ApiLocoSetFsmID        int64 = 7101
-	ApiLocoSetBalanceMode  int64 = 7102
-	ApiLocoSetSwingHeight  int64 = 7103
-	ApiLocoSetStandHeight  int64 = 7104
-	ApiLocoSetVelocity     int64 = 7105
-	ApiLocoSetArmTask      int64 = 7106
-	ApiLocoSetSpeedMode    int64 = 7107
+	ApiLocoGetFsmID       int64 = 7001
+	ApiLocoGetFsmMode     int64 = 7002
+	ApiLocoGetBalanceMode int64 = 7003
+	ApiLocoGetSwingHeight int64 = 7004
+	ApiLocoGetStandHeight int64 = 7005
+	ApiLocoSetFsmID       int64 = 7101
+	ApiLocoSetBalanceMode int64 = 7102
+	ApiLocoSetSwingHeight int64 = 7103
+	ApiLocoSetStandHeight int64 = 7104
+	ApiLocoSetVelocity    int64 = 7105
+	ApiLocoSetArmTask     int64 = 7106
+	ApiLocoSetSpeedMode   int64 = 7107
 )
 
 // G1 FSM (Finite State Machine) IDs used with SetFsmId.
 //
-// Note: the G1 firmware has evolved the "Start" (main locomotion) state ID
-// over time. The older unitree_sdk2 C++ client used 500; current firmware
-// and the unitree_sdk2_python client use 200. Sending the old value succeeds
-// at the RPC layer (rc=0) but silently does not transition state on recent
-// firmware, which is why ready_to_move previously appeared to succeed but
-// leave the robot unresponsive to Move commands.
+// Note: the G1 firmware has evolved the FSM ID space. The older unitree_sdk2
+// C++ client used FsmStandUp=4 and FsmStart=500; current firmware (and the
+// unitree_sdk2_python client) uses distinct transitional IDs: 706 for
+// Squat→StandUp and 702 for Lie→StandUp, plus 200 for Start. Sending the
+// legacy values succeeds at the RPC layer (rc=0) but silently does not
+// transition state on recent firmware — this is why earlier ready_to_move
+// sequences appeared to succeed but left the robot unresponsive to Move.
+//
+// The canonical Python example (g1_loco_client_example.py option 1) is
+// Damp → Squat2StandUp, after which Move commands work immediately — no
+// explicit Start(200) is required on current firmware.
 const (
-	FsmZeroTorque = 0
-	FsmDamp       = 1
-	FsmSquat      = 2
-	FsmSit        = 3
-	FsmStandUp    = 4
-	FsmStart      = 200
+	FsmZeroTorque    = 0
+	FsmDamp          = 1
+	FsmSquat         = 2
+	FsmSit           = 3
+	FsmStandUp       = 4 // legacy C++ SDK value; current firmware uses 706/702
+	FsmStart         = 200
+	FsmLie2StandUp   = 702
+	FsmSquat2StandUp = 706
 )
 
 // Unitree video API IDs.
@@ -260,33 +267,35 @@ func (l *LocoClient) SetArmTask(taskID int) error {
 // numeric IDs come from the SDK's g1_loco_api.hpp / g1_loco_client.hpp.
 // "Release" (99) returns the arms to a neutral pose so locomotion can resume.
 const (
-	ArmTaskReleaseArm   = 99
-	ArmTaskShakeHand    = 27
-	ArmTaskHighFive     = 18
-	ArmTaskHug          = 19
-	ArmTaskHeart        = 20
-	ArmTaskRefuse       = 21
-	ArmTaskRightKiss    = 22
-	ArmTaskLeftKiss     = 23
-	ArmTaskTwoHandKiss  = 24
-	ArmTaskHandsUp      = 15
-	ArmTaskClap         = 17
-	ArmTaskFaceWave     = 12
-	ArmTaskHighWave     = 13
-	ArmTaskWaveHand     = 0
-	ArmTaskTurnWave     = 1
+	ArmTaskReleaseArm  = 99
+	ArmTaskShakeHand   = 27
+	ArmTaskHighFive    = 18
+	ArmTaskHug         = 19
+	ArmTaskHeart       = 20
+	ArmTaskRefuse      = 21
+	ArmTaskRightKiss   = 22
+	ArmTaskLeftKiss    = 23
+	ArmTaskTwoHandKiss = 24
+	ArmTaskHandsUp     = 15
+	ArmTaskClap        = 17
+	ArmTaskFaceWave    = 12
+	ArmTaskHighWave    = 13
+	ArmTaskWaveHand    = 0
+	ArmTaskTurnWave    = 1
 )
 
 // High-level convenience wrappers matching the C++ SDK's LocoClient API.
-func (l *LocoClient) ZeroTorque() (int, error)   { return 0, l.SetFsmID(FsmZeroTorque) }
-func (l *LocoClient) Damp() (int, error)         { return 0, l.SetFsmID(FsmDamp) }
-func (l *LocoClient) Squat() (int, error)        { return 0, l.SetFsmID(FsmSquat) }
-func (l *LocoClient) Sit() (int, error)          { return 0, l.SetFsmID(FsmSit) }
-func (l *LocoClient) StandUp() (int, error)      { return 0, l.SetFsmID(FsmStandUp) }
-func (l *LocoClient) Start() (int, error)        { return 0, l.SetFsmID(FsmStart) }
-func (l *LocoClient) BalanceStand() (int, error) { return 0, l.SetBalanceMode(0) }
-func (l *LocoClient) HighStand() (int, error)    { return 0, l.SetStandHeight(float32(^uint32(0))) }
-func (l *LocoClient) LowStand() (int, error)     { return 0, l.SetStandHeight(0) }
+func (l *LocoClient) ZeroTorque() (int, error)    { return 0, l.SetFsmID(FsmZeroTorque) }
+func (l *LocoClient) Damp() (int, error)          { return 0, l.SetFsmID(FsmDamp) }
+func (l *LocoClient) Squat() (int, error)         { return 0, l.SetFsmID(FsmSquat) }
+func (l *LocoClient) Sit() (int, error)           { return 0, l.SetFsmID(FsmSit) }
+func (l *LocoClient) StandUp() (int, error)       { return 0, l.SetFsmID(FsmStandUp) }
+func (l *LocoClient) Squat2StandUp() (int, error) { return 0, l.SetFsmID(FsmSquat2StandUp) }
+func (l *LocoClient) Lie2StandUp() (int, error)   { return 0, l.SetFsmID(FsmLie2StandUp) }
+func (l *LocoClient) Start() (int, error)         { return 0, l.SetFsmID(FsmStart) }
+func (l *LocoClient) BalanceStand() (int, error)  { return 0, l.SetBalanceMode(0) }
+func (l *LocoClient) HighStand() (int, error)     { return 0, l.SetStandHeight(float32(^uint32(0))) }
+func (l *LocoClient) LowStand() (int, error)      { return 0, l.SetStandHeight(0) }
 
 // Arm gesture wrappers.
 func (l *LocoClient) WaveHand() (int, error)    { return 0, l.SetArmTask(ArmTaskWaveHand) }
