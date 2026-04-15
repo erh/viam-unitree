@@ -26,6 +26,16 @@
       "api": "rdk:component:generic",
       "model": "erh:viam-unitree:g1",
       "description": "Generic component for Unitree G1 with high-level control commands"
+    },
+    {
+      "api": "rdk:component:arm",
+      "model": "erh:viam-unitree:g1-left-arm",
+      "description": "Left arm joint control for the Unitree G1 (uses arm_sdk)"
+    },
+    {
+      "api": "rdk:component:arm",
+      "model": "erh:viam-unitree:g1-right-arm",
+      "description": "Right arm joint control for the Unitree G1 (uses arm_sdk)"
     }
   ],
   "entrypoint": "viam-unitree",

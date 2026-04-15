@@ -1,0 +1,84 @@
+{
+    "name": "g1_left_arm",
+    "kinematic_param_type": "SVA",
+    "links": [
+        {
+            "id": "left_shoulder_offset",
+            "parent": "world",
+            "translation": {"x": 0, "y": 145, "z": 290}
+        },
+        {
+            "id": "left_upper_arm",
+            "parent": "left_shoulder_yaw",
+            "translation": {"x": 0, "y": 0, "z": -280}
+        },
+        {
+            "id": "left_forearm",
+            "parent": "left_elbow",
+            "translation": {"x": 0, "y": 0, "z": -280}
+        },
+        {
+            "id": "left_hand",
+            "parent": "left_wrist_yaw",
+            "translation": {"x": 0, "y": 0, "z": -80}
+        }
+    ],
+    "joints": [
+        {
+            "id": "left_shoulder_pitch",
+            "type": "revolute",
+            "parent": "left_shoulder_offset",
+            "axis": {"x": 0, "y": 1, "z": 0},
+            "min": -177,
+            "max": 153
+        },
+        {
+            "id": "left_shoulder_roll",
+            "type": "revolute",
+            "parent": "left_shoulder_pitch",
+            "axis": {"x": 1, "y": 0, "z": 0},
+            "min": -91,
+            "max": 129
+        },
+        {
+            "id": "left_shoulder_yaw",
+            "type": "revolute",
+            "parent": "left_shoulder_roll",
+            "axis": {"x": 0, "y": 0, "z": 1},
+            "min": -150,
+            "max": 150
+        },
+        {
+            "id": "left_elbow",
+            "type": "revolute",
+            "parent": "left_upper_arm",
+            "axis": {"x": 0, "y": 1, "z": 0},
+            "min": -60,
+            "max": 120
+        },
+        {
+            "id": "left_wrist_roll",
+            "type": "revolute",
+            "parent": "left_forearm",
+            "axis": {"x": 1, "y": 0, "z": 0},
+            "min": -113,
+            "max": 113
+        },
+        {
+            "id": "left_wrist_pitch",
+            "type": "revolute",
+            "parent": "left_wrist_roll",
+            "axis": {"x": 0, "y": 1, "z": 0},
+            "min": -92,
+            "max": 92
+        },
+        {
+            "id": "left_wrist_yaw",
+            "type": "revolute",
+            "parent": "left_wrist_pitch",
+            "axis": {"x": 0, "y": 0, "z": 1},
+            "min": -92,
+            "max": 92
+        }
+    ]
+}

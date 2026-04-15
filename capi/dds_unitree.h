@@ -53,6 +53,86 @@ typedef struct {
     unitree_seq_uint8_t binary;
 } unitree_response_t;
 
+/*
+ * Unitree G1 (HG) low-level control / state types. These match the CDR
+ * encoding of unitree_hg::msg::dds_::LowCmd_ and LowState_.
+ *
+ * The G1 arm_sdk topic ("rt/arm_sdk") accepts a LowCmd_ message and the
+ * robot blends the commanded arm motors (indices 15..28) into its sport
+ * controller. Motor index 29 carries a "weight" (q field) that controls
+ * how strongly arm_sdk overrides locomotion-driven arm motion: 0 = sport
+ * mode owns the arms, 1 = arm_sdk fully owns them.
+ */
+#define UNITREE_HG_NUM_MOTOR 35
+
+typedef struct {
+    uint8_t  mode;
+    float    q;
+    float    dq;
+    float    tau;
+    float    kp;
+    float    kd;
+    uint32_t reserve;
+} unitree_hg_motor_cmd_t;
+
+typedef struct {
+    uint8_t  mode;
+    float    q;
+    float    dq;
+    float    ddq;
+    float    tau_est;
+    float    temperature[2];
+    float    vol;
+    uint32_t sensor[2];
+    uint32_t motorstate;
+    uint32_t reserve[4];
+} unitree_hg_motor_state_t;
+
+typedef struct {
+    float    quaternion[4];
+    float    gyroscope[3];
+    float    accelerometer[3];
+    float    rpy[3];
+    int32_t  temperature;
+} unitree_hg_imu_state_t;
+
+typedef struct {
+    uint8_t  mode_pr;
+    uint8_t  mode_machine;
+    unitree_hg_motor_cmd_t motor_cmd[UNITREE_HG_NUM_MOTOR];
+    uint32_t reserve[4];
+    uint32_t crc;
+} unitree_hg_lowcmd_t;
+
+/* LowState_ is partially decoded - we only care about mode/tick/IMU/motors.
+ * The on-the-wire struct also contains BmsState_, wireless_remote[40] and a
+ * trailing reserve+crc; those fields are still read but skipped/ignored by
+ * the descriptor below. */
+typedef struct {
+    uint32_t version[2];
+    uint8_t  mode_pr;
+    uint8_t  mode_machine;
+    uint32_t tick;
+    unitree_hg_imu_state_t imu_state;
+    unitree_hg_motor_state_t motor_state[UNITREE_HG_NUM_MOTOR];
+    /* BmsState_ - 13 bytes, treated as opaque blob */
+    uint8_t  bms_version_high;
+    uint8_t  bms_version_low;
+    uint8_t  bms_status;
+    uint8_t  bms_soc;
+    int32_t  bms_current;
+    uint16_t bms_cycle;
+    int8_t   bms_bq_ntc[2];
+    int8_t   bms_mcu_ntc[2];
+    float    bms_vol;
+    uint8_t  wireless_remote[40];
+    uint32_t reserve[4];
+    uint32_t crc;
+} unitree_hg_lowstate_t;
+
+extern const dds_topic_descriptor_t unitree_hg_lowcmd_desc;
+extern const dds_topic_descriptor_t unitree_hg_lowstate_desc;
+
 /* ROS2 sensor_msgs::msg::dds_::PointCloud2_ - flattened to match CDR layout. */
 typedef struct {
     char    *name;
@@ -112,9 +192,28 @@ void unitree_response_free(unitree_response_t *resp);
 /* Create a subscriber for a streaming (non-RPC) topic.
    topic_type indicates which topic descriptor to use:
      0 = PointCloud2
+     1 = unitree_hg LowState (G1 low-level state)
    Returns 0 on success and writes the reader handle to *reader_out. */
 int unitree_dds_subscribe(const char *topic_name, int topic_type,
                           dds_entity_t *reader_out);
+
+/* Create a publisher for the unitree_hg LowCmd type, on the given topic
+   (typically "rt/arm_sdk"). Returns 0 on success. */
+int unitree_dds_create_lowcmd_writer(const char *topic_name,
+                                     dds_entity_t *writer_out);
+
+/* Publish a LowCmd_ on the given writer. Returns 0 on success.
+   The caller is responsible for filling cmd; this function does NOT compute
+   any CRC (the rt/arm_sdk topic accepts cmd.crc = 0). */
+int unitree_dds_publish_lowcmd(dds_entity_t writer, const unitree_hg_lowcmd_t *cmd);
+
+/* Take the latest LowState_ from a reader created with topic_type=1.
+   Returns 0 on success; the caller can read out directly (no allocations). */
+int unitree_dds_take_lowstate(dds_entity_t reader, int timeout_ms,
+                              unitree_hg_lowstate_t *out);
+
+/* Delete a writer created by unitree_dds_create_lowcmd_writer. */
+void unitree_dds_close_writer(dds_entity_t writer);
 
 /* Take the latest PointCloud2 from a reader. Returns 0 on success.
    On success, *out is populated and caller must call unitree_pointcloud2_free(). */

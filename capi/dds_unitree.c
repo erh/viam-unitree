@@ -129,6 +129,123 @@ const dds_topic_descriptor_t unitree_pointcloud2_desc = {
     .m_meta = ""
 };
 
+/* --- unitree_hg::msg::dds_::LowCmd_ descriptor ---
+ *
+ * CDR layout (in field order):
+ *   uint8 mode_pr
+ *   uint8 mode_machine
+ *   MotorCmd_ motor_cmd[35]    -- fixed-length array of struct
+ *   uint32 reserve[4]          -- fixed-length array of uint32
+ *   uint32 crc
+ *
+ * MotorCmd_ inner layout:
+ *   uint8 mode
+ *   float q, dq, tau, kp, kd
+ *   uint32 reserve
+ *
+ * For a fixed-length array of struct, CycloneDDS uses:
+ *   [ADR|ARR|SUBTYPE_STU, offset, count, elem_size, (next_off<<16)|elem_off]
+ * with the element ops inlined and terminated by RTS.
+ */
+static const uint32_t unitree_hg_lowcmd_ops[] = {
+    /* 0  */ DDS_OP_ADR | DDS_OP_TYPE_1BY,                    offsetof(unitree_hg_lowcmd_t, mode_pr),
+    /* 2  */ DDS_OP_ADR | DDS_OP_TYPE_1BY,                    offsetof(unitree_hg_lowcmd_t, mode_machine),
+    /* 4  */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_STU, offsetof(unitree_hg_lowcmd_t, motor_cmd),
+    /* 6  */ UNITREE_HG_NUM_MOTOR,
+    /* 7  */ sizeof(unitree_hg_motor_cmd_t),
+    /* 8  */ (12u << 16) | 5u,  /* next_insn=12 (skip past element ops), elem_insn=5 (jump to op 13) */
+    /* 9  */ 0u, 0u, 0u,         /* padding for ARR opcode */
+    /* 12 */ DDS_OP_RTS,          /* end of array element processing (placeholder) */
+    /* 13 */ DDS_OP_ADR | DDS_OP_TYPE_1BY,                    offsetof(unitree_hg_motor_cmd_t, mode),
+    /* 15 */ DDS_OP_ADR | DDS_OP_TYPE_4BY,                    offsetof(unitree_hg_motor_cmd_t, q),
+    /* 17 */ DDS_OP_ADR | DDS_OP_TYPE_4BY,                    offsetof(unitree_hg_motor_cmd_t, dq),
+    /* 19 */ DDS_OP_ADR | DDS_OP_TYPE_4BY,                    offsetof(unitree_hg_motor_cmd_t, tau),
+    /* 21 */ DDS_OP_ADR | DDS_OP_TYPE_4BY,                    offsetof(unitree_hg_motor_cmd_t, kp),
+    /* 23 */ DDS_OP_ADR | DDS_OP_TYPE_4BY,                    offsetof(unitree_hg_motor_cmd_t, kd),
+    /* 25 */ DDS_OP_ADR | DDS_OP_TYPE_4BY,                    offsetof(unitree_hg_motor_cmd_t, reserve),
+    /* 27 */ DDS_OP_RTS,
+    /* 28 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY, offsetof(unitree_hg_lowcmd_t, reserve),
+    /* 30 */ 4u,
+    /* 31 */ DDS_OP_ADR | DDS_OP_TYPE_4BY,                    offsetof(unitree_hg_lowcmd_t, crc),
+    /* 33 */ DDS_OP_RTS
+};
+
+const dds_topic_descriptor_t unitree_hg_lowcmd_desc = {
+    .m_size = sizeof(unitree_hg_lowcmd_t),
+    .m_align = sizeof(uint32_t),
+    .m_flagset = DDS_TOPIC_NO_OPTIMIZE,
+    .m_nkeys = 0u,
+    .m_typename = "unitree_hg::msg::dds_::LowCmd_",
+    .m_keys = NULL,
+    .m_nops = sizeof(unitree_hg_lowcmd_ops) / sizeof(uint32_t),
+    .m_ops = unitree_hg_lowcmd_ops,
+    .m_meta = ""
+};
+
+/* --- unitree_hg::msg::dds_::LowState_ descriptor --- */
+static const uint32_t unitree_hg_lowstate_ops[] = {
+    /* version[2] */
+    DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY, offsetof(unitree_hg_lowstate_t, version), 2u,
+    /* mode_pr / mode_machine */
+    DDS_OP_ADR | DDS_OP_TYPE_1BY, offsetof(unitree_hg_lowstate_t, mode_pr),
+    DDS_OP_ADR | DDS_OP_TYPE_1BY, offsetof(unitree_hg_lowstate_t, mode_machine),
+    /* tick */
+    DDS_OP_ADR | DDS_OP_TYPE_4BY, offsetof(unitree_hg_lowstate_t, tick),
+    /* IMUState_ - inline struct flattened in CDR order */
+    DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY, offsetof(unitree_hg_lowstate_t, imu_state.quaternion),    4u,
+    DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY, offsetof(unitree_hg_lowstate_t, imu_state.gyroscope),     3u,
+    DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY, offsetof(unitree_hg_lowstate_t, imu_state.accelerometer), 3u,
+    DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY, offsetof(unitree_hg_lowstate_t, imu_state.rpy),           3u,
+    DDS_OP_ADR | DDS_OP_TYPE_4BY | DDS_OP_FLAG_SGN,    offsetof(unitree_hg_lowstate_t, imu_state.temperature),
+    /* motor_state[35] - array of struct */
+    /*  +0 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_STU, offsetof(unitree_hg_lowstate_t, motor_state),
+    /*  +2 */ UNITREE_HG_NUM_MOTOR,
+    /*  +3 */ sizeof(unitree_hg_motor_state_t),
+    /*  +4 */ (24u << 16) | 5u,  /* next_insn=24 (skip past element ops), elem_insn=5 */
+    /*  +5 */ 0u, 0u, 0u,         /* padding for ARR opcode */
+    /*  +8 */ DDS_OP_RTS,          /* placeholder before element ops */
+    /* element ops for MotorState_ */
+    DDS_OP_ADR | DDS_OP_TYPE_1BY,                    offsetof(unitree_hg_motor_state_t, mode),
+    DDS_OP_ADR | DDS_OP_TYPE_4BY,                    offsetof(unitree_hg_motor_state_t, q),
+    DDS_OP_ADR | DDS_OP_TYPE_4BY,                    offsetof(unitree_hg_motor_state_t, dq),
+    DDS_OP_ADR | DDS_OP_TYPE_4BY,                    offsetof(unitree_hg_motor_state_t, ddq),
+    DDS_OP_ADR | DDS_OP_TYPE_4BY,                    offsetof(unitree_hg_motor_state_t, tau_est),
+    DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY, offsetof(unitree_hg_motor_state_t, temperature), 2u,
+    DDS_OP_ADR | DDS_OP_TYPE_4BY,                    offsetof(unitree_hg_motor_state_t, vol),
+    DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY, offsetof(unitree_hg_motor_state_t, sensor),      2u,
+    DDS_OP_ADR | DDS_OP_TYPE_4BY,                    offsetof(unitree_hg_motor_state_t, motorstate),
+    DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY, offsetof(unitree_hg_motor_state_t, reserve),    4u,
+    DDS_OP_RTS,
+    /* BmsState_ - inline */
+    DDS_OP_ADR | DDS_OP_TYPE_1BY, offsetof(unitree_hg_lowstate_t, bms_version_high),
+    DDS_OP_ADR | DDS_OP_TYPE_1BY, offsetof(unitree_hg_lowstate_t, bms_version_low),
+    DDS_OP_ADR | DDS_OP_TYPE_1BY, offsetof(unitree_hg_lowstate_t, bms_status),
+    DDS_OP_ADR | DDS_OP_TYPE_1BY, offsetof(unitree_hg_lowstate_t, bms_soc),
+    DDS_OP_ADR | DDS_OP_TYPE_4BY | DDS_OP_FLAG_SGN, offsetof(unitree_hg_lowstate_t, bms_current),
+    DDS_OP_ADR | DDS_OP_TYPE_2BY, offsetof(unitree_hg_lowstate_t, bms_cycle),
+    DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_1BY | DDS_OP_FLAG_SGN, offsetof(unitree_hg_lowstate_t, bms_bq_ntc),  2u,
+    DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_1BY | DDS_OP_FLAG_SGN, offsetof(unitree_hg_lowstate_t, bms_mcu_ntc), 2u,
+    DDS_OP_ADR | DDS_OP_TYPE_4BY, offsetof(unitree_hg_lowstate_t, bms_vol),
+    /* wireless_remote[40] */
+    DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_1BY, offsetof(unitree_hg_lowstate_t, wireless_remote), 40u,
+    /* reserve[4], crc */
+    DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY, offsetof(unitree_hg_lowstate_t, reserve),         4u,
+    DDS_OP_ADR | DDS_OP_TYPE_4BY,                       offsetof(unitree_hg_lowstate_t, crc),
+    DDS_OP_RTS
+};
+
+const dds_topic_descriptor_t unitree_hg_lowstate_desc = {
+    .m_size = sizeof(unitree_hg_lowstate_t),
+    .m_align = sizeof(uint32_t),
+    .m_flagset = DDS_TOPIC_NO_OPTIMIZE,
+    .m_nkeys = 0u,
+    .m_typename = "unitree_hg::msg::dds_::LowState_",
+    .m_keys = NULL,
+    .m_nops = sizeof(unitree_hg_lowstate_ops) / sizeof(uint32_t),
+    .m_ops = unitree_hg_lowstate_ops,
+    .m_meta = ""
+};
+
 /* --- DDS infrastructure --- */
 
 static dds_entity_t g_participant = 0;
@@ -280,6 +397,7 @@ int unitree_dds_subscribe(const char *topic_name, int topic_type,
     const dds_topic_descriptor_t *desc = NULL;
     switch (topic_type) {
         case 0: desc = &unitree_pointcloud2_desc; break;
+        case 1: desc = &unitree_hg_lowstate_desc; break;
         default: return -1;
     }
 
@@ -376,6 +494,68 @@ void unitree_pointcloud2_free(unitree_pointcloud2_t *pc) {
         pc->data._buffer = NULL;
         pc->data._length = 0;
     }
+}
+
+int unitree_dds_create_lowcmd_writer(const char *topic_name,
+                                     dds_entity_t *writer_out) {
+    if (g_participant <= 0)
+        return -1;
+
+    dds_entity_t topic = dds_create_topic(
+        g_participant, &unitree_hg_lowcmd_desc, topic_name, NULL, NULL);
+    if (topic < 0)
+        return -1;
+
+    /* arm_sdk topic: best-effort, KEEP_LAST(1) - matches Unitree examples. */
+    dds_qos_t *qos = dds_create_qos();
+    dds_qset_reliability(qos, DDS_RELIABILITY_BEST_EFFORT, 0);
+    dds_qset_history(qos, DDS_HISTORY_KEEP_LAST, 1);
+    *writer_out = dds_create_writer(g_participant, topic, qos, NULL);
+    dds_delete_qos(qos);
+    if (*writer_out < 0)
+        return -1;
+    return 0;
+}
+
+int unitree_dds_publish_lowcmd(dds_entity_t writer, const unitree_hg_lowcmd_t *cmd) {
+    dds_return_t rc = dds_write(writer, cmd);
+    return (rc == DDS_RETCODE_OK) ? 0 : -1;
+}
+
+int unitree_dds_take_lowstate(dds_entity_t reader, int timeout_ms,
+                              unitree_hg_lowstate_t *out) {
+    void *samples[1] = { NULL };
+    dds_sample_info_t infos[1];
+
+    dds_duration_t timeout = DDS_MSECS(timeout_ms);
+    dds_entity_t ws = dds_create_waitset(g_participant);
+    dds_entity_t cond = dds_create_readcondition(reader, DDS_ANY_STATE);
+    dds_waitset_attach(ws, cond, 0);
+
+    dds_return_t rc = dds_waitset_wait(ws, NULL, 0, timeout);
+    dds_waitset_detach(ws, cond);
+    dds_delete(cond);
+    dds_delete(ws);
+
+    if (rc <= 0)
+        return -1;
+
+    rc = dds_take(reader, samples, infos, 1, 1);
+    if (rc <= 0 || !infos[0].valid_data) {
+        if (rc > 0) dds_return_loan(reader, samples, rc);
+        return -1;
+    }
+
+    /* Plain-old-data: shallow copy is sufficient (no embedded pointers). */
+    memcpy(out, samples[0], sizeof(*out));
+    dds_return_loan(reader, samples, 1);
+    return 0;
+}
+
+void unitree_dds_close_writer(dds_entity_t writer) {
+    dds_entity_t topic = (writer > 0) ? dds_get_topic(writer) : 0;
+    if (writer > 0) dds_delete(writer);
+    if (topic > 0) dds_delete(topic);
 }
 
 void unitree_dds_close_subscriber(dds_entity_t reader) {

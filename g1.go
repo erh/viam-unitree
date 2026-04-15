@@ -99,10 +99,39 @@ func (g *g1) readyToMove(ctx context.Context) error {
 	return nil
 }
 
+// armGestures maps DoCommand strings to the LocoClient arm-task wrappers.
+// These are pre-recorded G1 arm motions exposed by the sport service via
+// SetArmTask. They run to completion on the robot side.
+var armGestures = map[string]int{
+	"wave_hand":     ArmTaskWaveHand,
+	"turn_wave":     ArmTaskTurnWave,
+	"release_arm":   ArmTaskReleaseArm,
+	"shake_hand":    ArmTaskShakeHand,
+	"high_five":     ArmTaskHighFive,
+	"hug":           ArmTaskHug,
+	"heart":         ArmTaskHeart,
+	"refuse":        ArmTaskRefuse,
+	"right_kiss":    ArmTaskRightKiss,
+	"left_kiss":     ArmTaskLeftKiss,
+	"two_hand_kiss": ArmTaskTwoHandKiss,
+	"hands_up":      ArmTaskHandsUp,
+	"clap":          ArmTaskClap,
+	"face_wave":     ArmTaskFaceWave,
+	"high_wave":     ArmTaskHighWave,
+}
+
 func (g *g1) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	cmdStr, ok := cmd["command"].(string)
 	if !ok {
 		return map[string]interface{}{"error": "missing 'command' field"}, nil
+	}
+
+	// Built-in arm gestures triggered via SetArmTask.
+	if taskID, isGesture := armGestures[cmdStr]; isGesture {
+		if err := g.loco.SetArmTask(taskID); err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
+		return map[string]interface{}{"rc": 0.0}, nil
 	}
 
 	switch cmdStr {
@@ -111,8 +140,40 @@ func (g *g1) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[str
 			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
 		}
 		return map[string]interface{}{"rc": 0.0}, nil
+	case "set_arm_task":
+		// Generic passthrough for any task ID, including IDs not in the
+		// armGestures map. Accepts task_id as a number.
+		raw, ok := cmd["task_id"]
+		if !ok {
+			return map[string]interface{}{"rc": -1.0, "error": "missing 'task_id'"}, nil
+		}
+		taskID, err := numericToInt(raw)
+		if err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
+		if err := g.loco.SetArmTask(taskID); err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
+		return map[string]interface{}{"rc": 0.0}, nil
 	default:
 		return map[string]interface{}{"error": "unknown command: " + cmdStr}, nil
+	}
+}
+
+// numericToInt accepts the JSON numeric flavors that map[string]interface{}
+// can hold (float64 from Viam DoCommand decoding, plus the integer types).
+func numericToInt(v interface{}) (int, error) {
+	switch x := v.(type) {
+	case float64:
+		return int(x), nil
+	case int:
+		return x, nil
+	case int64:
+		return int(x), nil
+	case int32:
+		return int(x), nil
+	default:
+		return 0, fmt.Errorf("expected numeric, got %T", v)
 	}
 }
 
