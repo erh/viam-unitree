@@ -4,6 +4,7 @@ package main
 import (
 	"go.viam.com/rdk/components/base"
 	"go.viam.com/rdk/components/camera"
+	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/module"
 	"go.viam.com/rdk/resource"
 )
@@ -13,5 +14,6 @@ func main() {
 		resource.APIModel{API: base.API, Model: g1BaseModel},
 		resource.APIModel{API: camera.API, Model: g1CameraModel},
 		resource.APIModel{API: camera.API, Model: g1LidarModel},
+		resource.APIModel{API: generic.API, Model: g1Model},
 	)
 }
