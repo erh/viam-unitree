@@ -42,13 +42,20 @@ const (
 )
 
 // G1 FSM (Finite State Machine) IDs used with SetFsmId.
+//
+// Note: the G1 firmware has evolved the "Start" (main locomotion) state ID
+// over time. The older unitree_sdk2 C++ client used 500; current firmware
+// and the unitree_sdk2_python client use 200. Sending the old value succeeds
+// at the RPC layer (rc=0) but silently does not transition state on recent
+// firmware, which is why ready_to_move previously appeared to succeed but
+// leave the robot unresponsive to Move commands.
 const (
-	FsmZeroTorque  = 0
-	FsmDamp        = 1
-	FsmSquat       = 2
-	FsmSit         = 3
-	FsmStandUp     = 4
-	FsmStart       = 500
+	FsmZeroTorque = 0
+	FsmDamp       = 1
+	FsmSquat      = 2
+	FsmSit        = 3
+	FsmStandUp    = 4
+	FsmStart      = 200
 )
 
 // Unitree video API IDs.
