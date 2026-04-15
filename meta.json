@@ -21,6 +21,11 @@
       "api": "rdk:component:camera",
       "model": "erh:viam-unitree:g1-lidar",
       "description": "Lidar component for Unitree G1 (exposes point clouds via the camera API)"
+    },
+    {
+      "api": "rdk:component:generic",
+      "model": "erh:viam-unitree:g1",
+      "description": "Generic component for Unitree G1 with high-level control commands"
     }
   ],
   "entrypoint": "viam-unitree",
