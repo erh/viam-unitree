@@ -67,10 +67,27 @@ func newG1(ctx context.Context, deps resource.Dependencies, conf resource.Config
 }
 
 // readyToMove runs the post-boot sequence to get the G1 into a state where
-// it can accept locomotion commands: stand up from the ground, wait for the
-// motion to settle, then transition the FSM into the "start" (locomotion)
-// state.
+// it can accept locomotion commands. This mirrors the reference sequence in
+// unitree_sdk2_python's g1_loco_client_example.py "Squat2StandUp" option:
+// Damp → brief settle → StandUp → long settle → Start (main locomotion).
+//
+// Damp must come first: it puts the joints into a known damped state so the
+// StandUp FSM transition is accepted. Without it, the stand-up request is
+// often silently ignored by the firmware (the RPC still returns rc=0), which
+// is how this command used to appear to succeed while leaving the robot
+// unable to move.
 func (g *g1) readyToMove(ctx context.Context) error {
+	g.logger.Info("readyToMove: issuing damp")
+	if _, err := g.loco.Damp(); err != nil {
+		return fmt.Errorf("damp: %w", err)
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(500 * time.Millisecond):
+	}
+
 	g.logger.Info("readyToMove: issuing stand_up")
 	if _, err := g.loco.StandUp(); err != nil {
 		return fmt.Errorf("stand_up: %w", err)
