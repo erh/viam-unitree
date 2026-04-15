@@ -12,6 +12,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
       - uses: viamrobotics/build-action@v1
         with:
           # note: you can replace this line with 'version: ""' if

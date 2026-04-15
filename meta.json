@@ -16,18 +16,22 @@
       "api": "rdk:component:camera",
       "model": "erh:viam-unitree:g1-camera",
       "description": "Camera component for Unitree G1 video"
+    },
+    {
+      "api": "rdk:component:camera",
+      "model": "erh:viam-unitree:g1-lidar",
+      "description": "Lidar component for Unitree G1 (exposes point clouds via the camera API)"
     }
   ],
-  "entrypoint": "bin/viam-unitree",
+  "entrypoint": "viam-unitree",
   "first_run": "",
   "build": {
-    "build": "conan build . --build missing -s:a compiler.cppstd=17 --lockfile-partial",
+    "build": "make module",
     "setup": "",
-    "path": "build/Release/module.tar.gz",
+    "path": "build/module.tar.gz",
     "arch": [
       "linux/amd64",
       "linux/arm64"
-    ],
-    "distro": "bookworm"
+    ]
   }
 }
