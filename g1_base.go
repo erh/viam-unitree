@@ -244,6 +244,13 @@ func (b *g1Base) DoCommand(ctx context.Context, cmd map[string]interface{}) (map
 		_, err = b.loco.Start()
 	case "stop_move":
 		err = b.loco.StopMove()
+	case "continuous_gait", "walk_mode":
+		// Enable "walk mode" so SetVelocity / Move commands are honored.
+		// Equivalent to SetBalanceMode(1).
+		_, err = b.loco.ContinuousGait(true)
+	case "balance_mode_static":
+		// Disable continuous gait; robot holds a static stand.
+		_, err = b.loco.ContinuousGait(false)
 	default:
 		return map[string]interface{}{"error": "unknown command: " + cmdStr}, nil
 	}

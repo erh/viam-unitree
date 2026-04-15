@@ -67,20 +67,22 @@ func newG1(ctx context.Context, deps resource.Dependencies, conf resource.Config
 }
 
 // readyToMove runs the post-boot sequence to get the G1 into a state where
-// it can accept locomotion commands. This mirrors option 1 "Squat2StandUp"
-// in unitree_sdk2_python's g1_loco_client_example.py, which is the canonical
-// path the Python example uses to enable movement: Damp → Squat2StandUp.
-// In that example, Move(0.3,0,0) works immediately after this sequence — no
-// additional Start() call is required.
+// it can accept locomotion commands:
 //
-// Damp (FSM 1) must come first: it puts the joints into a known damped state
-// so the Squat2StandUp transition is accepted. Squat2StandUp (FSM 706) is
-// the current-firmware transition that replaces the legacy StandUp (FSM 4)
-// and that leaves the FSM in the "balanced stand" state which accepts
-// SetVelocity commands. Previous versions of this sequence used StandUp (4)
-// then Start (200); the StandUp (4) transition is silently ignored on
-// current firmware (RPC returns rc=0 but FSM does not change), so the
-// robot would end up stuck in a state that no longer accepts Move commands.
+//	Damp (FSM 1) → Squat2StandUp (FSM 706) → settle → ContinuousGait(true)
+//
+// Damp puts the joints into a known damped state so the Squat2StandUp
+// transition is accepted. Squat2StandUp (FSM 706) is the current-firmware
+// transition that replaces the legacy StandUp (FSM 4) — the legacy FSM 4 is
+// silently ignored on recent firmware (RPC returns rc=0 but FSM does not
+// change), which previously left the robot unresponsive to Move commands.
+//
+// After the robot is standing, we must switch into "walk mode" by setting
+// BalanceMode 1 (ContinuousGait enabled). The default post-StandUp balance
+// mode is 0 (static balance): the robot stands firm but ignores SetVelocity
+// entirely. Without this step, ready_to_move appears to succeed (robot
+// stands) but Move commands silently do nothing — matching the symptom the
+// user reported.
 func (g *g1) readyToMove(ctx context.Context) error {
 	g.logger.Info("readyToMove: issuing damp")
 	if _, err := g.loco.Damp(); err != nil {
@@ -98,13 +100,24 @@ func (g *g1) readyToMove(ctx context.Context) error {
 		return fmt.Errorf("squat_to_stand_up: %w", err)
 	}
 
-	// Give the robot time to reach the standing pose before returning. The
-	// Python example waits on the user hitting Enter for the next command;
-	// 5s is a conservative approximation of that settle time.
+	// Give the robot time to reach the standing pose before switching into
+	// walk mode. Issuing ContinuousGait mid-transition can be rejected.
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-time.After(5 * time.Second):
+	}
+
+	g.logger.Info("readyToMove: enabling continuous gait (walk mode)")
+	if _, err := g.loco.ContinuousGait(true); err != nil {
+		return fmt.Errorf("continuous_gait: %w", err)
+	}
+
+	// Short settle so the first Move() call doesn't race the mode switch.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(500 * time.Millisecond):
 	}
 
 	g.logger.Info("readyToMove: complete")

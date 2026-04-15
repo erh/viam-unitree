@@ -297,6 +297,19 @@ func (l *LocoClient) BalanceStand() (int, error)  { return 0, l.SetBalanceMode(0
 func (l *LocoClient) HighStand() (int, error)     { return 0, l.SetStandHeight(float32(^uint32(0))) }
 func (l *LocoClient) LowStand() (int, error)      { return 0, l.SetStandHeight(0) }
 
+// ContinuousGait toggles "walk mode". After Squat2StandUp the robot defaults
+// to static balance (BalanceMode 0), which holds a solid stand but ignores
+// SetVelocity commands. Setting BalanceMode 1 puts the robot into a
+// continuous gait so it will actually walk in response to Move() calls.
+// Mirrors the C++ SDK's LocoClient::ContinuousGait(bool).
+func (l *LocoClient) ContinuousGait(enable bool) (int, error) {
+	mode := 0
+	if enable {
+		mode = 1
+	}
+	return 0, l.SetBalanceMode(mode)
+}
+
 // Arm gesture wrappers.
 func (l *LocoClient) WaveHand() (int, error)    { return 0, l.SetArmTask(ArmTaskWaveHand) }
 func (l *LocoClient) TurnWave() (int, error)    { return 0, l.SetArmTask(ArmTaskTurnWave) }
