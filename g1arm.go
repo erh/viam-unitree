@@ -12,7 +12,6 @@ import (
 
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/logging"
-	"go.viam.com/rdk/motionplan"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/referenceframe/urdf"
 	"go.viam.com/rdk/resource"
@@ -235,16 +234,7 @@ func (a *g1Arm) EndPosition(ctx context.Context, extra map[string]interface{}) (
 }
 
 func (a *g1Arm) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
-	current, err := a.JointPositions(ctx, extra)
-	if err != nil {
-		return err
-	}
-
-	plan, err := motionplan.PlanFrameMotion(ctx, a.logger, pose, a.model, current, nil, nil)
-	if err != nil {
-		return err
-	}
-	return a.MoveThroughJointPositions(ctx, plan, nil, extra)
+	return fmt.Errorf("MoveToPosition not supported")
 }
 
 func (a *g1Arm) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
