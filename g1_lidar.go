@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
 	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"math"
 	"time"
 
@@ -16,6 +20,7 @@ import (
 	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/rimage/transform"
+	rdkutils "go.viam.com/rdk/utils"
 )
 
 var g1LidarModel = resource.NewModel("erh", "viam-unitree", "g1-lidar")
@@ -24,6 +29,21 @@ type G1LidarConfig struct {
 	NetworkInterface string `json:"network_interface"`
 	// Topic defaults to "rt/utlidar/cloud" (the standard Unitree lidar topic).
 	Topic string `json:"topic"`
+
+	// RangeMeters is the half-width (in meters) of the 2D top-down view.
+	// The rendered image spans [-RangeMeters, +RangeMeters] in X and Y.
+	// Defaults to 10.0.
+	RangeMeters float64 `json:"range_meters"`
+
+	// ImageSizePixels is the width and height (in pixels) of the rendered
+	// 2D image. Defaults to 512.
+	ImageSizePixels int `json:"image_size_pixels"`
+
+	// ZMinMeters / ZMaxMeters filter points by height (meters, in lidar frame)
+	// before projecting to 2D. Useful to slice a horizontal band near the
+	// sensor. Leave both zero to disable filtering.
+	ZMinMeters float64 `json:"z_min_meters"`
+	ZMaxMeters float64 `json:"z_max_meters"`
 }
 
 func (c *G1LidarConfig) Validate(path string) ([]string, error) {
@@ -42,6 +62,13 @@ type g1Lidar struct {
 
 	logger logging.Logger
 	lidar  *LidarClient
+
+	// 2D rendering params
+	rangeMM   float64 // half-width of view, in mm
+	imageSize int     // pixels
+	zFilter   bool    // whether to apply z filter
+	zMinMM    float64
+	zMaxMM    float64
 }
 
 func newG1Lidar(ctx context.Context, deps resource.Dependencies, conf resource.Config, logger logging.Logger) (camera.Camera, error) {
@@ -59,7 +86,18 @@ func newG1Lidar(ctx context.Context, deps resource.Dependencies, conf resource.C
 		topic = cfg.Topic
 	}
 
-	logger.Infof("Initializing G1Lidar (interface=%s topic=%s)", networkInterface, topic)
+	rangeMeters := 10.0
+	if cfg.RangeMeters > 0 {
+		rangeMeters = cfg.RangeMeters
+	}
+	imageSize := 512
+	if cfg.ImageSizePixels > 0 {
+		imageSize = cfg.ImageSizePixels
+	}
+	zFilter := cfg.ZMinMeters != 0 || cfg.ZMaxMeters != 0
+
+	logger.Infof("Initializing G1Lidar (interface=%s topic=%s range=%.2fm size=%dpx)",
+		networkInterface, topic, rangeMeters, imageSize)
 
 	if err := InitDDS(0, networkInterface); err != nil {
 		return nil, fmt.Errorf("DDS init: %w", err)
@@ -74,9 +112,14 @@ func newG1Lidar(ctx context.Context, deps resource.Dependencies, conf resource.C
 	logger.Info("G1Lidar initialized")
 
 	return &g1Lidar{
-		Named:  conf.ResourceName().AsNamed(),
-		logger: logger,
-		lidar:  lidar,
+		Named:     conf.ResourceName().AsNamed(),
+		logger:    logger,
+		lidar:     lidar,
+		rangeMM:   rangeMeters * 1000.0,
+		imageSize: imageSize,
+		zFilter:   zFilter,
+		zMinMM:    cfg.ZMinMeters * 1000.0,
+		zMaxMM:    cfg.ZMaxMeters * 1000.0,
 	}, nil
 }
 
@@ -87,6 +130,133 @@ func (l *g1Lidar) NextPointCloud(ctx context.Context) (pointcloud.PointCloud, er
 		return nil, err
 	}
 	return convertPointCloud2(pc2)
+}
+
+// render2D produces a top-down (bird's-eye) 2D image of the current point cloud.
+// X points right, Y points up (screen-up = world +Y), origin at the image center.
+// Points are drawn in white; the sensor origin is marked with a red crosshair.
+// Point height (Z) is encoded in a blue->green->yellow->red colormap when the
+// lidar returns z values, to give a sense of obstacle height.
+func (l *g1Lidar) render2D(ctx context.Context) (image.Image, error) {
+	pc, err := l.NextPointCloud(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	size := l.imageSize
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	draw.Draw(img, img.Bounds(), &image.Uniform{C: color.RGBA{R: 16, G: 16, B: 24, A: 255}}, image.Point{}, draw.Src)
+
+	// Draw range rings (at 1/4, 1/2, 3/4 of the range) for visual scale.
+	gridColor := color.RGBA{R: 40, G: 40, B: 60, A: 255}
+	center := size / 2
+	for _, frac := range []float64{0.25, 0.5, 0.75, 1.0} {
+		r := float64(size/2) * frac
+		drawCircle(img, center, center, int(r), gridColor)
+	}
+	// Draw axes.
+	for i := 0; i < size; i++ {
+		img.Set(i, center, gridColor)
+		img.Set(center, i, gridColor)
+	}
+
+	scale := float64(size) / (2 * l.rangeMM)
+
+	pc.Iterate(0, 0, func(p r3.Vector, _ pointcloud.Data) bool {
+		if l.zFilter && (p.Z < l.zMinMM || p.Z > l.zMaxMM) {
+			return true
+		}
+		if math.Abs(p.X) > l.rangeMM || math.Abs(p.Y) > l.rangeMM {
+			return true
+		}
+		// World X -> screen X (right), World Y -> screen Y (up, so flip).
+		px := center + int(p.X*scale)
+		py := center - int(p.Y*scale)
+		if px < 0 || px >= size || py < 0 || py >= size {
+			return true
+		}
+		img.Set(px, py, heightColor(p.Z))
+		return true
+	})
+
+	// Mark sensor origin with a red square.
+	origin := color.RGBA{R: 255, G: 64, B: 64, A: 255}
+	for dx := -2; dx <= 2; dx++ {
+		for dy := -2; dy <= 2; dy++ {
+			px, py := center+dx, center+dy
+			if px >= 0 && px < size && py >= 0 && py < size {
+				img.Set(px, py, origin)
+			}
+		}
+	}
+	return img, nil
+}
+
+// heightColor maps a z height (mm) to a color. Low = blue, mid = green,
+// high = red. Roughly spans -1m .. +2m which covers most indoor obstacles.
+func heightColor(zmm float64) color.RGBA {
+	const (
+		zLo = -1000.0
+		zHi = 2000.0
+	)
+	t := (zmm - zLo) / (zHi - zLo)
+	if t < 0 {
+		t = 0
+	}
+	if t > 1 {
+		t = 1
+	}
+	// blue (0,0,255) -> green (0,255,0) -> red (255,0,0)
+	var r, g, b uint8
+	if t < 0.5 {
+		u := t * 2
+		r = 0
+		g = uint8(255 * u)
+		b = uint8(255 * (1 - u))
+	} else {
+		u := (t - 0.5) * 2
+		r = uint8(255 * u)
+		g = uint8(255 * (1 - u))
+		b = 0
+	}
+	return color.RGBA{R: r, G: g, B: b, A: 255}
+}
+
+// drawCircle draws a (non-filled) circle using the midpoint algorithm.
+func drawCircle(img *image.RGBA, cx, cy, r int, c color.Color) {
+	if r <= 0 {
+		return
+	}
+	x, y, err := r-1, 0, 0
+	dx, dy := 1, 1
+	diam := r * 2
+	plot := func(px, py int) {
+		if px >= img.Bounds().Min.X && px < img.Bounds().Max.X &&
+			py >= img.Bounds().Min.Y && py < img.Bounds().Max.Y {
+			img.Set(px, py, c)
+		}
+	}
+	for x >= y {
+		plot(cx+x, cy+y)
+		plot(cx+y, cy+x)
+		plot(cx-y, cy+x)
+		plot(cx-x, cy+y)
+		plot(cx-x, cy-y)
+		plot(cx-y, cy-x)
+		plot(cx+y, cy-x)
+		plot(cx+x, cy-y)
+
+		if err <= 0 {
+			y++
+			err += dy
+			dy += 2
+		}
+		if err > 0 {
+			x--
+			dx += 2
+			err += dx - diam
+		}
+	}
 }
 
 // convertPointCloud2 turns a ROS2 PointCloud2 into a Viam point cloud.
@@ -191,26 +361,47 @@ func readFloat(buf []byte, off uint32, datatype uint8, bo binary.ByteOrder) (flo
 	return 0, false
 }
 
-// --- Camera interface methods (mostly no-ops; lidar exposes point clouds, not images) ---
+// --- Camera interface methods: 2D methods render a top-down view of the point cloud. ---
 
 func (l *g1Lidar) Image(ctx context.Context, mimeType string, extra map[string]interface{}) ([]byte, camera.ImageMetadata, error) {
-	return nil, camera.ImageMetadata{}, fmt.Errorf("lidar does not produce 2D images; use NextPointCloud")
+	img, err := l.render2D(ctx)
+	if err != nil {
+		return nil, camera.ImageMetadata{}, err
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil, camera.ImageMetadata{}, fmt.Errorf("encode png: %w", err)
+	}
+	return buf.Bytes(), camera.ImageMetadata{MimeType: rdkutils.MimeTypePNG}, nil
 }
 
 func (l *g1Lidar) Images(ctx context.Context) ([]camera.NamedImage, resource.ResponseMetadata, error) {
-	return nil, resource.ResponseMetadata{CapturedAt: time.Now()}, fmt.Errorf("lidar does not produce 2D images; use NextPointCloud")
+	img, err := l.render2D(ctx)
+	if err != nil {
+		return nil, resource.ResponseMetadata{}, err
+	}
+	return []camera.NamedImage{
+			{Image: img, SourceName: l.Name().ShortName()},
+		}, resource.ResponseMetadata{
+			CapturedAt: time.Now(),
+		}, nil
 }
 
 func (l *g1Lidar) Stream(ctx context.Context, errHandlers ...gostream.ErrorHandler) (gostream.VideoStream, error) {
 	return gostream.NewEmbeddedVideoStreamFromReader(gostream.VideoReaderFunc(func(ctx context.Context) (image.Image, func(), error) {
-		return nil, nil, fmt.Errorf("lidar does not produce 2D images")
+		img, err := l.render2D(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return img, func() {}, nil
 	})), nil
 }
 
 func (l *g1Lidar) Properties(ctx context.Context) (camera.Properties, error) {
 	return camera.Properties{
 		SupportsPCD: true,
-		ImageType:   camera.UnspecifiedStream,
+		MimeTypes:   []string{rdkutils.MimeTypePNG},
+		ImageType:   camera.ColorStream,
 	}, nil
 }
 
