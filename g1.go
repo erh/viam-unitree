@@ -67,15 +67,20 @@ func newG1(ctx context.Context, deps resource.Dependencies, conf resource.Config
 }
 
 // readyToMove runs the post-boot sequence to get the G1 into a state where
-// it can accept locomotion commands. This mirrors the reference sequence in
-// unitree_sdk2_python's g1_loco_client_example.py "Squat2StandUp" option:
-// Damp → brief settle → StandUp → long settle → Start (main locomotion).
+// it can accept locomotion commands. This mirrors option 1 "Squat2StandUp"
+// in unitree_sdk2_python's g1_loco_client_example.py, which is the canonical
+// path the Python example uses to enable movement: Damp → Squat2StandUp.
+// In that example, Move(0.3,0,0) works immediately after this sequence — no
+// additional Start() call is required.
 //
-// Damp must come first: it puts the joints into a known damped state so the
-// StandUp FSM transition is accepted. Without it, the stand-up request is
-// often silently ignored by the firmware (the RPC still returns rc=0), which
-// is how this command used to appear to succeed while leaving the robot
-// unable to move.
+// Damp (FSM 1) must come first: it puts the joints into a known damped state
+// so the Squat2StandUp transition is accepted. Squat2StandUp (FSM 706) is
+// the current-firmware transition that replaces the legacy StandUp (FSM 4)
+// and that leaves the FSM in the "balanced stand" state which accepts
+// SetVelocity commands. Previous versions of this sequence used StandUp (4)
+// then Start (200); the StandUp (4) transition is silently ignored on
+// current firmware (RPC returns rc=0 but FSM does not change), so the
+// robot would end up stuck in a state that no longer accepts Move commands.
 func (g *g1) readyToMove(ctx context.Context) error {
 	g.logger.Info("readyToMove: issuing damp")
 	if _, err := g.loco.Damp(); err != nil {
@@ -88,28 +93,18 @@ func (g *g1) readyToMove(ctx context.Context) error {
 	case <-time.After(500 * time.Millisecond):
 	}
 
-	g.logger.Info("readyToMove: issuing stand_up")
-	if _, err := g.loco.StandUp(); err != nil {
-		return fmt.Errorf("stand_up: %w", err)
+	g.logger.Info("readyToMove: issuing squat_to_stand_up (FSM 706)")
+	if _, err := g.loco.Squat2StandUp(); err != nil {
+		return fmt.Errorf("squat_to_stand_up: %w", err)
 	}
 
-	// Give the robot time to reach the standing pose before transitioning
-	// into the locomotion FSM.
+	// Give the robot time to reach the standing pose before returning. The
+	// Python example waits on the user hitting Enter for the next command;
+	// 5s is a conservative approximation of that settle time.
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-time.After(5 * time.Second):
-	}
-
-	g.logger.Info("readyToMove: issuing start")
-	if _, err := g.loco.Start(); err != nil {
-		return fmt.Errorf("start: %w", err)
-	}
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(2 * time.Second):
 	}
 
 	g.logger.Info("readyToMove: complete")
