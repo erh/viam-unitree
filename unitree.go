@@ -238,12 +238,37 @@ func (l *LocoClient) SetStandHeight(height float32) error {
 	return err
 }
 
-// SetArmTask triggers an arm task by ID (e.g. wave_hand=0, turn_wave=1).
+// SetArmTask triggers a built-in arm action by task ID. The G1 LocoClient
+// exposes a fixed set of pre-recorded arm motions (wave, hands-up, hug, etc.).
+// See the ArmTask* constants below for known IDs.
 func (l *LocoClient) SetArmTask(taskID int) error {
 	params, _ := json.Marshal(map[string]int{"data": taskID})
 	_, _, err := l.rpc.Call(ApiLocoSetArmTask, string(params), 10000)
 	return err
 }
+
+// G1 built-in arm action task IDs.
+//
+// These match the Unitree SDK2 G1 LocoClient pre-recorded arm gestures. The
+// numeric IDs come from the SDK's g1_loco_api.hpp / g1_loco_client.hpp.
+// "Release" (99) returns the arms to a neutral pose so locomotion can resume.
+const (
+	ArmTaskReleaseArm   = 99
+	ArmTaskShakeHand    = 27
+	ArmTaskHighFive     = 18
+	ArmTaskHug          = 19
+	ArmTaskHeart        = 20
+	ArmTaskRefuse       = 21
+	ArmTaskRightKiss    = 22
+	ArmTaskLeftKiss     = 23
+	ArmTaskTwoHandKiss  = 24
+	ArmTaskHandsUp      = 15
+	ArmTaskClap         = 17
+	ArmTaskFaceWave     = 12
+	ArmTaskHighWave     = 13
+	ArmTaskWaveHand     = 0
+	ArmTaskTurnWave     = 1
+)
 
 // High-level convenience wrappers matching the C++ SDK's LocoClient API.
 func (l *LocoClient) ZeroTorque() (int, error)   { return 0, l.SetFsmID(FsmZeroTorque) }
@@ -255,7 +280,23 @@ func (l *LocoClient) Start() (int, error)        { return 0, l.SetFsmID(FsmStart
 func (l *LocoClient) BalanceStand() (int, error) { return 0, l.SetBalanceMode(0) }
 func (l *LocoClient) HighStand() (int, error)    { return 0, l.SetStandHeight(float32(^uint32(0))) }
 func (l *LocoClient) LowStand() (int, error)     { return 0, l.SetStandHeight(0) }
-func (l *LocoClient) WaveHand() (int, error)     { return 0, l.SetArmTask(0) }
+
+// Arm gesture wrappers.
+func (l *LocoClient) WaveHand() (int, error)    { return 0, l.SetArmTask(ArmTaskWaveHand) }
+func (l *LocoClient) TurnWave() (int, error)    { return 0, l.SetArmTask(ArmTaskTurnWave) }
+func (l *LocoClient) ReleaseArm() (int, error)  { return 0, l.SetArmTask(ArmTaskReleaseArm) }
+func (l *LocoClient) ShakeHand() (int, error)   { return 0, l.SetArmTask(ArmTaskShakeHand) }
+func (l *LocoClient) HighFive() (int, error)    { return 0, l.SetArmTask(ArmTaskHighFive) }
+func (l *LocoClient) Hug() (int, error)         { return 0, l.SetArmTask(ArmTaskHug) }
+func (l *LocoClient) Heart() (int, error)       { return 0, l.SetArmTask(ArmTaskHeart) }
+func (l *LocoClient) Refuse() (int, error)      { return 0, l.SetArmTask(ArmTaskRefuse) }
+func (l *LocoClient) RightKiss() (int, error)   { return 0, l.SetArmTask(ArmTaskRightKiss) }
+func (l *LocoClient) LeftKiss() (int, error)    { return 0, l.SetArmTask(ArmTaskLeftKiss) }
+func (l *LocoClient) TwoHandKiss() (int, error) { return 0, l.SetArmTask(ArmTaskTwoHandKiss) }
+func (l *LocoClient) HandsUp() (int, error)     { return 0, l.SetArmTask(ArmTaskHandsUp) }
+func (l *LocoClient) Clap() (int, error)        { return 0, l.SetArmTask(ArmTaskClap) }
+func (l *LocoClient) FaceWave() (int, error)    { return 0, l.SetArmTask(ArmTaskFaceWave) }
+func (l *LocoClient) HighWave() (int, error)    { return 0, l.SetArmTask(ArmTaskHighWave) }
 
 func (l *LocoClient) Close() {
 	if l.rpc != nil {

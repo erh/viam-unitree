@@ -2,6 +2,7 @@
 package main
 
 import (
+	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/base"
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/components/generic"
@@ -15,5 +16,7 @@ func main() {
 		resource.APIModel{API: camera.API, Model: g1CameraModel},
 		resource.APIModel{API: camera.API, Model: g1LidarModel},
 		resource.APIModel{API: generic.API, Model: g1Model},
+		resource.APIModel{API: arm.API, Model: g1LeftArmModel},
+		resource.APIModel{API: arm.API, Model: g1RightArmModel},
 	)
 }
