@@ -116,10 +116,22 @@ type RPCClient struct {
 	writer C.dds_entity_t
 	reader C.dds_entity_t
 	nextID atomic.Int64
+
+	// strictMatch controls request/response correlation. When true
+	// (e.g. sport service), Call drains stale responses at the start
+	// and filters incoming responses by identity_api_id / identity_id
+	// so stale replies from prior requests can't be mis-attributed.
+	// When false (e.g. videohub), Call takes the next response
+	// regardless — videohub doesn't reliably echo request identifiers
+	// and can have late-arriving frames that must not be drained.
+	strictMatch bool
 }
 
-// NewRPCClient creates an RPC client for the given service (e.g. "sport", "videohub").
-func NewRPCClient(serviceName string) (*RPCClient, error) {
+// NewRPCClient creates an RPC client for the given service. Pass
+// strictMatch=true for services where request/response identity is
+// tracked (sport), false for services that don't echo identifiers
+// (videohub).
+func NewRPCClient(serviceName string, strictMatch bool) (*RPCClient, error) {
 	cName := C.CString(serviceName)
 	defer C.free(unsafe.Pointer(cName))
 
@@ -128,7 +140,7 @@ func NewRPCClient(serviceName string) (*RPCClient, error) {
 	if rc != 0 {
 		return nil, fmt.Errorf("create RPC for %q failed (rc=%d)", serviceName, rc)
 	}
-	return &RPCClient{writer: writer, reader: reader}, nil
+	return &RPCClient{writer: writer, reader: reader, strictMatch: strictMatch}, nil
 }
 
 // Close releases the writer/reader entities. Safe to call multiple times.
@@ -160,14 +172,16 @@ func (c *RPCClient) Call(apiID int64, paramsJSON string, timeoutMs int) (string,
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Drain any lingering stale responses before issuing the new request
-	// (non-blocking: 0ms timeout until empty).
-	for {
-		var stale C.unitree_response_t
-		if rc := C.unitree_dds_read_response(c.reader, 0, &stale); rc != 0 {
-			break
+	if c.strictMatch {
+		// Drain any lingering stale responses (from prior calls or a
+		// robot reboot) so we don't mis-attribute them to this request.
+		for {
+			var stale C.unitree_response_t
+			if rc := C.unitree_dds_read_response(c.reader, 0, &stale); rc != 0 {
+				break
+			}
+			C.unitree_response_free(&stale)
 		}
-		C.unitree_response_free(&stale)
 	}
 
 	rc := C.unitree_dds_write_request(c.writer, C.int64_t(reqID), C.int64_t(apiID), cParams)
@@ -188,11 +202,13 @@ func (c *RPCClient) Call(apiID int64, paramsJSON string, timeoutMs int) (string,
 			return "", nil, fmt.Errorf("read response timeout (api=%d req_id=%d)", apiID, reqID)
 		}
 
-		if int64(resp.identity_id) != reqID {
-			// Stale response from a prior call (likely from before a
-			// robot reboot). Discard and keep waiting.
-			C.unitree_response_free(&resp)
-			continue
+		if c.strictMatch {
+			respAPIID := int64(resp.identity_api_id)
+			respReqID := int64(resp.identity_id)
+			if (respAPIID != 0 && respAPIID != apiID) || (respReqID != 0 && respReqID != reqID) {
+				C.unitree_response_free(&resp)
+				continue
+			}
 		}
 
 		var data string
@@ -221,7 +237,7 @@ type LocoClient struct {
 }
 
 func NewLocoClient() (*LocoClient, error) {
-	rpc, err := NewRPCClient("sport")
+	rpc, err := NewRPCClient("sport", true)
 	if err != nil {
 		return nil, err
 	}
@@ -441,7 +457,7 @@ type VideoClient struct {
 }
 
 func NewVideoClient() (*VideoClient, error) {
-	rpc, err := NewRPCClient("videohub")
+	rpc, err := NewRPCClient("videohub", false)
 	if err != nil {
 		return nil, err
 	}
