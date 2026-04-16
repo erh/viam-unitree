@@ -67,53 +67,46 @@ func newG1(ctx context.Context, deps resource.Dependencies, conf resource.Config
 }
 
 // readyToMove runs the post-boot sequence to get the G1 into a state
-// that accepts Move commands. Sequence: Damp (1) → StandUp (4) → Run (802).
+// that accepts Move commands. Sequence:
+//   Damp (1) → StandUp (4) → SetBalanceMode(1) → Run (802)
 //
-// FSM IDs on this firmware (discovered empirically, not in the Python
-// SDK docs):
-//   - 4   = StandUp (the stand-up transition this firmware honors;
-//           706/200/500/702 are all silently rejected)
-//   - 802 = Run/walk mode — the state where Move commands actually make
-//           the robot walk. Equivalent to putting the controller into
-//           "run mode".
-//
-// arm_sdk LowCmd publishing is paused for the duration since the
-// firmware refuses sport-service FSM transitions while rt/arm_sdk is
-// active.
+// This is intentionally minimal — just 4 RPC calls with sleeps between.
+// Issuing many rapid RPCs (logFsm reads, transitionFsm pre/post checks)
+// creates enough DDS waitset churn on the shared participant to corrupt
+// internal CycloneDDS state and break the videohub (camera) reader.
+// The manual DoCommand equivalents of these 4 calls were verified to
+// leave both walking and camera functional.
 func (g *g1) readyToMove(ctx context.Context) error {
-	resume := pauseActiveArmSDK()
-	defer resume()
-	g.logger.Info("readyToMove: paused arm_sdk publisher (if running)")
-
-	if err := sleepCtx(ctx, 200*time.Millisecond); err != nil {
+	g.logger.Info("readyToMove: Damp")
+	if err := g.loco.SetFsmID(FsmDamp); err != nil {
+		g.logger.Warnf("readyToMove: Damp RPC error (may already be in state): %v", err)
+	}
+	if err := sleepCtx(ctx, 1*time.Second); err != nil {
 		return err
 	}
 
-	g.logFsm("readyToMove: initial state")
-
-	if err := g.transitionFsm(ctx, "Damp", FsmDamp, g.loco.Damp, 500*time.Millisecond); err != nil {
-		return err
-	}
-
-	if err := g.transitionFsm(ctx, "StandUp", FsmStandUp, g.loco.StandUp, 5*time.Second); err != nil {
+	g.logger.Info("readyToMove: StandUp")
+	if err := g.loco.SetFsmID(FsmStandUp); err != nil {
 		return fmt.Errorf("stand_up: %w", err)
 	}
+	if err := sleepCtx(ctx, 5*time.Second); err != nil {
+		return err
+	}
 
-	// After StandUp the robot reports fsm_mode=1, but in walk mode
-	// (fsm_id=802) fsm_mode is 0. SetBalanceMode(1) flips fsm_mode 1→0,
-	// which seems to be the precondition the firmware wants before it
-	// will accept a Run transition.
-	g.logger.Info("readyToMove: SetBalanceMode(1) to prepare for Run")
+	g.logger.Info("readyToMove: SetBalanceMode(1)")
 	if err := g.loco.SetBalanceMode(1); err != nil {
-		return fmt.Errorf("set_balance_mode(1): %w", err)
+		return fmt.Errorf("set_balance_mode: %w", err)
 	}
 	if err := sleepCtx(ctx, 500*time.Millisecond); err != nil {
 		return err
 	}
-	g.logFsm("readyToMove: after SetBalanceMode(1)")
 
-	if err := g.transitionFsm(ctx, "Run", FsmRun, g.loco.Run, 2*time.Second); err != nil {
+	g.logger.Info("readyToMove: Run")
+	if err := g.loco.SetFsmID(FsmRun); err != nil {
 		return fmt.Errorf("run: %w", err)
+	}
+	if err := sleepCtx(ctx, 1*time.Second); err != nil {
+		return err
 	}
 
 	g.logger.Info("readyToMove: complete")

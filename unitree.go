@@ -172,18 +172,6 @@ func (c *RPCClient) Call(apiID int64, paramsJSON string, timeoutMs int) (string,
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.strictMatch {
-		// Drain any lingering stale responses (from prior calls or a
-		// robot reboot) so we don't mis-attribute them to this request.
-		for {
-			var stale C.unitree_response_t
-			if rc := C.unitree_dds_read_response(c.reader, 0, &stale); rc != 0 {
-				break
-			}
-			C.unitree_response_free(&stale)
-		}
-	}
-
 	rc := C.unitree_dds_write_request(c.writer, C.int64_t(reqID), C.int64_t(apiID), cParams)
 	if rc != 0 {
 		return "", nil, fmt.Errorf("write request failed (api=%d rc=%d)", apiID, rc)
