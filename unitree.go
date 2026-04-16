@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 )
 
@@ -43,26 +44,22 @@ const (
 
 // G1 FSM (Finite State Machine) IDs used with SetFsmId.
 //
-// Note: the G1 firmware has evolved the FSM ID space. The older unitree_sdk2
-// C++ client used FsmStandUp=4 and FsmStart=500; current firmware (and the
-// unitree_sdk2_python client) uses distinct transitional IDs: 706 for
-// Squat→StandUp and 702 for Lie→StandUp, plus 200 for Start. Sending the
-// legacy values succeeds at the RPC layer (rc=0) but silently does not
-// transition state on recent firmware — this is why earlier ready_to_move
-// sequences appeared to succeed but left the robot unresponsive to Move.
-//
-// The canonical Python example (g1_loco_client_example.py option 1) is
-// Damp → Squat2StandUp, after which Move commands work immediately — no
-// explicit Start(200) is required on current firmware.
+// Which IDs are honored depends on firmware version. The Unitree Python
+// SDK documents the newer transitional IDs (702=Lie2StandUp,
+// 706=Squat2StandUp, 200=Start), while the older C++ SDK used
+// FsmStandUp=4 and FsmStart=500. This robot's firmware only accepts
+// the legacy ID 4 for stand-up — 706/200/500/702 are silently rejected.
+// Use try_fsm DoCommand to discover which IDs a given firmware honors.
 const (
 	FsmZeroTorque    = 0
 	FsmDamp          = 1
 	FsmSquat         = 2
 	FsmSit           = 3
-	FsmStandUp       = 4 // legacy C++ SDK value; current firmware uses 706/702
+	FsmStandUp       = 4 // the stand-up transition this firmware honors
 	FsmStart         = 200
 	FsmLie2StandUp   = 702
 	FsmSquat2StandUp = 706
+	FsmRun           = 802 // walk/run mode — Move commands work here
 )
 
 // Unitree video API IDs.
@@ -146,8 +143,14 @@ func (c *RPCClient) Close() {
 	c.reader = 0
 }
 
-// Call sends an RPC request and waits for the response.
+// Call sends an RPC request and waits for the matching response.
 // Returns the response JSON data and binary payload.
+//
+// The DDS reader can hold stale responses from previous calls (notably
+// across a robot reboot, since the Go-side DDS participant stays alive).
+// We loop on read and discard any response whose identity_id doesn't
+// match the request we just sent, until the matching one arrives or the
+// total timeout elapses.
 func (c *RPCClient) Call(apiID int64, paramsJSON string, timeoutMs int) (string, []byte, error) {
 	reqID := c.nextID.Add(1)
 
@@ -157,33 +160,57 @@ func (c *RPCClient) Call(apiID int64, paramsJSON string, timeoutMs int) (string,
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Drain any lingering stale responses before issuing the new request
+	// (non-blocking: 0ms timeout until empty).
+	for {
+		var stale C.unitree_response_t
+		if rc := C.unitree_dds_read_response(c.reader, 0, &stale); rc != 0 {
+			break
+		}
+		C.unitree_response_free(&stale)
+	}
+
 	rc := C.unitree_dds_write_request(c.writer, C.int64_t(reqID), C.int64_t(apiID), cParams)
 	if rc != 0 {
 		return "", nil, fmt.Errorf("write request failed (api=%d rc=%d)", apiID, rc)
 	}
 
-	var resp C.unitree_response_t
-	rc = C.unitree_dds_read_response(c.reader, C.int(timeoutMs), &resp)
-	if rc != 0 {
-		return "", nil, fmt.Errorf("read response timeout (api=%d)", apiID)
-	}
-	defer C.unitree_response_free(&resp)
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return "", nil, fmt.Errorf("read response timeout (api=%d req_id=%d)", apiID, reqID)
+		}
 
-	var data string
-	if resp.data != nil {
-		data = C.GoString(resp.data)
-	}
+		var resp C.unitree_response_t
+		rc = C.unitree_dds_read_response(c.reader, C.int(remaining.Milliseconds()), &resp)
+		if rc != 0 {
+			return "", nil, fmt.Errorf("read response timeout (api=%d req_id=%d)", apiID, reqID)
+		}
 
-	var binary []byte
-	if resp.binary._length > 0 && resp.binary._buffer != nil {
-		binary = C.GoBytes(unsafe.Pointer(resp.binary._buffer), C.int(resp.binary._length))
-	}
+		if int64(resp.identity_id) != reqID {
+			// Stale response from a prior call (likely from before a
+			// robot reboot). Discard and keep waiting.
+			C.unitree_response_free(&resp)
+			continue
+		}
 
-	if resp.status_code != 0 {
-		return data, binary, fmt.Errorf("RPC error (api=%d status=%d)", apiID, resp.status_code)
-	}
+		var data string
+		if resp.data != nil {
+			data = C.GoString(resp.data)
+		}
+		var binary []byte
+		if resp.binary._length > 0 && resp.binary._buffer != nil {
+			binary = C.GoBytes(unsafe.Pointer(resp.binary._buffer), C.int(resp.binary._length))
+		}
+		status := resp.status_code
+		C.unitree_response_free(&resp)
 
-	return data, binary, nil
+		if status != 0 {
+			return data, binary, fmt.Errorf("RPC error (api=%d status=%d)", apiID, status)
+		}
+		return data, binary, nil
+	}
 }
 
 // LocoClient wraps the G1 sport service for locomotion commands.
@@ -235,6 +262,92 @@ func (l *LocoClient) StopMove() error {
 func (l *LocoClient) SetFsmID(fsmID int) error {
 	params, _ := json.Marshal(map[string]int{"data": fsmID})
 	_, _, err := l.rpc.Call(ApiLocoSetFsmID, string(params), 10000)
+	return err
+}
+
+// dataIntResponse matches the JSON shape used by G1 getters
+// (e.g. GetFsmId / GetFsmMode / GetBalanceMode): {"data": <int>}.
+type dataIntResponse struct {
+	Data int `json:"data"`
+}
+
+// GetFsmID reads the robot's current FSM state ID.
+func (l *LocoClient) GetFsmID() (int, error) {
+	data, _, err := l.rpc.Call(ApiLocoGetFsmID, "", 10000)
+	if err != nil {
+		return 0, err
+	}
+	var r dataIntResponse
+	if err := json.Unmarshal([]byte(data), &r); err != nil {
+		return 0, fmt.Errorf("parse FSM ID response %q: %w", data, err)
+	}
+	return r.Data, nil
+}
+
+// GetFsmMode reads the robot's current FSM mode.
+func (l *LocoClient) GetFsmMode() (int, error) {
+	data, _, err := l.rpc.Call(ApiLocoGetFsmMode, "", 10000)
+	if err != nil {
+		return 0, err
+	}
+	var r dataIntResponse
+	if err := json.Unmarshal([]byte(data), &r); err != nil {
+		return 0, fmt.Errorf("parse FSM mode response %q: %w", data, err)
+	}
+	return r.Data, nil
+}
+
+// GetBalanceMode reads the robot's current balance mode (0=static,
+// 1=continuous gait).
+func (l *LocoClient) GetBalanceMode() (int, error) {
+	data, _, err := l.rpc.Call(ApiLocoGetBalanceMode, "", 10000)
+	if err != nil {
+		return 0, err
+	}
+	var r dataIntResponse
+	if err := json.Unmarshal([]byte(data), &r); err != nil {
+		return 0, fmt.Errorf("parse balance mode response %q: %w", data, err)
+	}
+	return r.Data, nil
+}
+
+// dataFloatResponse matches the JSON shape for float getters:
+// {"data": <float>}.
+type dataFloatResponse struct {
+	Data float64 `json:"data"`
+}
+
+// GetSwingHeight reads the robot's current swing height (meters).
+func (l *LocoClient) GetSwingHeight() (float64, error) {
+	data, _, err := l.rpc.Call(ApiLocoGetSwingHeight, "", 10000)
+	if err != nil {
+		return 0, err
+	}
+	var r dataFloatResponse
+	if err := json.Unmarshal([]byte(data), &r); err != nil {
+		return 0, fmt.Errorf("parse swing height response %q: %w", data, err)
+	}
+	return r.Data, nil
+}
+
+// GetStandHeight reads the robot's current stand height (meters).
+func (l *LocoClient) GetStandHeight() (float64, error) {
+	data, _, err := l.rpc.Call(ApiLocoGetStandHeight, "", 10000)
+	if err != nil {
+		return 0, err
+	}
+	var r dataFloatResponse
+	if err := json.Unmarshal([]byte(data), &r); err != nil {
+		return 0, fmt.Errorf("parse stand height response %q: %w", data, err)
+	}
+	return r.Data, nil
+}
+
+// SetSpeedMode sets the robot's speed mode. API 7107; semantics and
+// valid range are firmware-dependent.
+func (l *LocoClient) SetSpeedMode(mode int) error {
+	params, _ := json.Marshal(map[string]int{"data": mode})
+	_, _, err := l.rpc.Call(ApiLocoSetSpeedMode, string(params), 10000)
 	return err
 }
 
@@ -293,6 +406,7 @@ func (l *LocoClient) StandUp() (int, error)       { return 0, l.SetFsmID(FsmStan
 func (l *LocoClient) Squat2StandUp() (int, error) { return 0, l.SetFsmID(FsmSquat2StandUp) }
 func (l *LocoClient) Lie2StandUp() (int, error)   { return 0, l.SetFsmID(FsmLie2StandUp) }
 func (l *LocoClient) Start() (int, error)         { return 0, l.SetFsmID(FsmStart) }
+func (l *LocoClient) Run() (int, error)           { return 0, l.SetFsmID(FsmRun) }
 func (l *LocoClient) BalanceStand() (int, error)  { return 0, l.SetBalanceMode(0) }
 func (l *LocoClient) HighStand() (int, error)     { return 0, l.SetStandHeight(float32(^uint32(0))) }
 func (l *LocoClient) LowStand() (int, error)      { return 0, l.SetStandHeight(0) }

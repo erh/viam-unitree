@@ -110,6 +110,12 @@ type armSDK struct {
 	hasState      atomic.Bool
 	lastStateTime time.Time
 
+	// paused gates the LowCmd publish in run(). Set while the G1 generic
+	// component is issuing sport-service FSM transitions: the firmware
+	// silently rejects sport stand-up transitions while rt/arm_sdk is
+	// actively publishing, even with weight=0.
+	paused atomic.Bool
+
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 }
@@ -118,6 +124,22 @@ var (
 	armSDKMu       sync.Mutex
 	armSDKInstance *armSDK
 )
+
+// pauseActiveArmSDK looks up the process-wide armSDK singleton (if any)
+// and gates its LowCmd publisher. Returns a resume func; safe to call
+// whether or not an armSDK exists. Intended use: the G1 generic component
+// pauses arm_sdk publishing around sport-service FSM transitions, which
+// the firmware silently rejects while rt/arm_sdk traffic is active.
+func pauseActiveArmSDK() func() {
+	armSDKMu.Lock()
+	a := armSDKInstance
+	armSDKMu.Unlock()
+	if a == nil {
+		return func() {}
+	}
+	a.paused.Store(true)
+	return func() { a.paused.Store(false) }
+}
 
 // getArmSDK returns the shared arm SDK singleton, creating it on first use.
 func getArmSDK() (*armSDK, error) {
@@ -263,8 +285,12 @@ func (a *armSDK) jointPositions(indices []int) ([]float32, bool) {
 	return out, true
 }
 
-// run is the publish/poll loop. Publishes the current LowCmd at ~50 Hz and
-// reads the latest LowState in the same iteration.
+// run is the publish/poll loop. Reads LowState every 20 ms. Publishes
+// LowCmd only when arm_sdk is actively driving the arms (weight > 0) —
+// any publishing on rt/arm_sdk, even at weight=0, puts the G1 firmware
+// into low-level control mode and makes the sport service refuse all
+// RPCs with status=7301. Staying silent when dormant lets sport retain
+// full control of the robot.
 func (a *armSDK) run() {
 	defer a.wg.Done()
 	ticker := time.NewTicker(20 * time.Millisecond)
@@ -273,24 +299,31 @@ func (a *armSDK) run() {
 	for {
 		select {
 		case <-a.stopCh:
-			// Best-effort: zero out the weight before exit so sport mode
-			// reclaims the arms.
+			// Best-effort handoff to sport: if we were driving the arms,
+			// publish a final weight=0 frame so the firmware ramps back
+			// to sport-owned arms before we go silent.
 			a.mu.Lock()
+			wasActive := a.weight > 0
 			a.weight = 0
 			a.commanded[G1ArmSDKWeightIndex].q = 0
 			cmd := a.snapshotLocked()
 			a.mu.Unlock()
-			C.unitree_dds_publish_lowcmd(a.writer, &cmd)
+			if wasActive {
+				C.unitree_dds_publish_lowcmd(a.writer, &cmd)
+			}
 			return
 		case <-ticker.C:
 		}
 
 		a.mu.Lock()
 		a.commanded[G1ArmSDKWeightIndex].q = C.float(a.weight)
+		active := a.weight > 0
 		cmd := a.snapshotLocked()
 		a.mu.Unlock()
 
-		C.unitree_dds_publish_lowcmd(a.writer, &cmd)
+		if active && !a.paused.Load() {
+			C.unitree_dds_publish_lowcmd(a.writer, &cmd)
+		}
 
 		var ls C.unitree_hg_lowstate_t
 		if rc := C.unitree_dds_take_lowstate(a.reader, 0, &ls); rc == 0 {

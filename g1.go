@@ -66,49 +66,119 @@ func newG1(ctx context.Context, deps resource.Dependencies, conf resource.Config
 	}, nil
 }
 
-// readyToMove runs the post-boot sequence to get the G1 into a state where
-// it can accept locomotion commands. This mirrors option 1 "Squat2StandUp"
-// in unitree_sdk2_python's g1_loco_client_example.py, which is the canonical
-// path the Python example uses to enable movement: Damp → Squat2StandUp.
-// In that example, Move(0.3,0,0) works immediately after this sequence — no
-// additional Start() call is required.
+// readyToMove runs the post-boot sequence to get the G1 into a state
+// that accepts Move commands. Sequence: Damp (1) → StandUp (4) → Run (802).
 //
-// Damp (FSM 1) must come first: it puts the joints into a known damped state
-// so the Squat2StandUp transition is accepted. Squat2StandUp (FSM 706) is
-// the current-firmware transition that replaces the legacy StandUp (FSM 4)
-// and that leaves the FSM in the "balanced stand" state which accepts
-// SetVelocity commands. Previous versions of this sequence used StandUp (4)
-// then Start (200); the StandUp (4) transition is silently ignored on
-// current firmware (RPC returns rc=0 but FSM does not change), so the
-// robot would end up stuck in a state that no longer accepts Move commands.
+// FSM IDs on this firmware (discovered empirically, not in the Python
+// SDK docs):
+//   - 4   = StandUp (the stand-up transition this firmware honors;
+//           706/200/500/702 are all silently rejected)
+//   - 802 = Run/walk mode — the state where Move commands actually make
+//           the robot walk. Equivalent to putting the controller into
+//           "run mode".
+//
+// arm_sdk LowCmd publishing is paused for the duration since the
+// firmware refuses sport-service FSM transitions while rt/arm_sdk is
+// active.
 func (g *g1) readyToMove(ctx context.Context) error {
-	g.logger.Info("readyToMove: issuing damp")
-	if _, err := g.loco.Damp(); err != nil {
-		return fmt.Errorf("damp: %w", err)
+	resume := pauseActiveArmSDK()
+	defer resume()
+	g.logger.Info("readyToMove: paused arm_sdk publisher (if running)")
+
+	if err := sleepCtx(ctx, 200*time.Millisecond); err != nil {
+		return err
 	}
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(500 * time.Millisecond):
+	g.logFsm("readyToMove: initial state")
+
+	if err := g.transitionFsm(ctx, "Damp", FsmDamp, g.loco.Damp, 500*time.Millisecond); err != nil {
+		return err
 	}
 
-	g.logger.Info("readyToMove: issuing squat_to_stand_up (FSM 706)")
-	if _, err := g.loco.Squat2StandUp(); err != nil {
-		return fmt.Errorf("squat_to_stand_up: %w", err)
+	if err := g.transitionFsm(ctx, "StandUp", FsmStandUp, g.loco.StandUp, 5*time.Second); err != nil {
+		return fmt.Errorf("stand_up: %w", err)
 	}
 
-	// Give the robot time to reach the standing pose before returning. The
-	// Python example waits on the user hitting Enter for the next command;
-	// 5s is a conservative approximation of that settle time.
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(5 * time.Second):
+	// After StandUp the robot reports fsm_mode=1, but in walk mode
+	// (fsm_id=802) fsm_mode is 0. SetBalanceMode(1) flips fsm_mode 1→0,
+	// which seems to be the precondition the firmware wants before it
+	// will accept a Run transition.
+	g.logger.Info("readyToMove: SetBalanceMode(1) to prepare for Run")
+	if err := g.loco.SetBalanceMode(1); err != nil {
+		return fmt.Errorf("set_balance_mode(1): %w", err)
+	}
+	if err := sleepCtx(ctx, 500*time.Millisecond); err != nil {
+		return err
+	}
+	g.logFsm("readyToMove: after SetBalanceMode(1)")
+
+	if err := g.transitionFsm(ctx, "Run", FsmRun, g.loco.Run, 2*time.Second); err != nil {
+		return fmt.Errorf("run: %w", err)
 	}
 
 	g.logger.Info("readyToMove: complete")
 	return nil
+}
+
+// transitionFsm issues an FSM-setting command and verifies the firmware
+// actually moved to expectedID. Returns nil if the robot is already in
+// the target state (idempotent). Returns an error if the RPC fails OR
+// if the FSM doesn't end up at expectedID after the settle wait (silent
+// rejection).
+func (g *g1) transitionFsm(ctx context.Context, name string, expectedID int, call func() (int, error), settle time.Duration) error {
+	current, err := g.loco.GetFsmID()
+	if err != nil {
+		return fmt.Errorf("%s: read FSM before: %w", name, err)
+	}
+	if current == expectedID {
+		g.logger.Infof("readyToMove: %s: already in FSM=%d, skipping", name, expectedID)
+		return nil
+	}
+
+	g.logger.Infof("readyToMove: issuing %s (FSM %d → %d)", name, current, expectedID)
+	if _, err := call(); err != nil {
+		return fmt.Errorf("%s RPC: %w", name, err)
+	}
+	if err := sleepCtx(ctx, settle); err != nil {
+		return err
+	}
+	g.logFsm(fmt.Sprintf("readyToMove: after %s", name))
+
+	after, err := g.loco.GetFsmID()
+	if err != nil {
+		return fmt.Errorf("%s: read FSM after: %w", name, err)
+	}
+	if after != expectedID {
+		return fmt.Errorf("%s: FSM stayed at %d (expected %d) — silent rejection", name, after, expectedID)
+	}
+	return nil
+}
+
+// logFsm queries and logs the current FSM id, FSM mode, and balance
+// mode. Any individual getter that fails is reported as "?" rather than
+// suppressing the whole line — GetBalanceMode in particular returns
+// status=7301 on some firmwares but the FSM getters still work.
+func (g *g1) logFsm(label string) {
+	fmtVal := func(v int, err error) string {
+		if err != nil {
+			return "?(" + err.Error() + ")"
+		}
+		return fmt.Sprintf("%d", v)
+	}
+	fsmID, idErr := g.loco.GetFsmID()
+	fsmMode, modeErr := g.loco.GetFsmMode()
+	balMode, balErr := g.loco.GetBalanceMode()
+	g.logger.Infof("%s: fsm_id=%s fsm_mode=%s balance_mode=%s",
+		label, fmtVal(fsmID, idErr), fmtVal(fsmMode, modeErr), fmtVal(balMode, balErr))
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
 }
 
 // armGestures maps DoCommand strings to the LocoClient arm-task wrappers.
@@ -152,6 +222,141 @@ func (g *g1) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[str
 			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
 		}
 		return map[string]interface{}{"rc": 0.0}, nil
+	case "set_fsm_id":
+		// Set an arbitrary FSM ID. Returns fsm_id before/after so you
+		// can see if it landed. Usage: {"command":"set_fsm_id","id":802}
+		raw, ok := cmd["id"]
+		if !ok {
+			return map[string]interface{}{"rc": -1.0, "error": "missing 'id'"}, nil
+		}
+		id, err := numericToInt(raw)
+		if err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
+		before, _ := g.loco.GetFsmID()
+		rpcErr := g.loco.SetFsmID(id)
+		time.Sleep(1 * time.Second)
+		after, _ := g.loco.GetFsmID()
+		result := map[string]interface{}{
+			"rc":           0.0,
+			"id_requested": id,
+			"fsm_before":   before,
+			"fsm_after":    after,
+			"changed":      before != after,
+		}
+		if rpcErr != nil {
+			result["rpc_error"] = rpcErr.Error()
+		}
+		g.logger.Infof("set_fsm_id(%d): %d → %d (rpc_err=%v)", id, before, after, rpcErr)
+		return result, nil
+	case "get_modes":
+		// Read every state/mode the sport service exposes. Use this
+		// while the robot is in a known-good state (e.g. walking via
+		// remote) to capture the exact values we need to reproduce.
+		result := map[string]interface{}{"rc": 0.0}
+		readInt := func(key string, fn func() (int, error)) {
+			v, err := fn()
+			if err != nil {
+				result[key+"_err"] = err.Error()
+			} else {
+				result[key] = v
+			}
+		}
+		readFloat := func(key string, fn func() (float64, error)) {
+			v, err := fn()
+			if err != nil {
+				result[key+"_err"] = err.Error()
+			} else {
+				result[key] = v
+			}
+		}
+		readInt("fsm_id", g.loco.GetFsmID)
+		readInt("fsm_mode", g.loco.GetFsmMode)
+		readInt("balance_mode", g.loco.GetBalanceMode)
+		readFloat("swing_height", g.loco.GetSwingHeight)
+		readFloat("stand_height", g.loco.GetStandHeight)
+		g.logger.Infof("get_modes: %+v", result)
+		return result, nil
+	case "set_speed_mode":
+		// Set speed mode (API 7107). Usage: {"command":"set_speed_mode","mode":<n>}
+		raw, ok := cmd["mode"]
+		if !ok {
+			return map[string]interface{}{"rc": -1.0, "error": "missing 'mode'"}, nil
+		}
+		mode, err := numericToInt(raw)
+		if err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
+		if err := g.loco.SetSpeedMode(mode); err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
+		return map[string]interface{}{"rc": 0.0}, nil
+	case "set_balance_mode":
+		// Experiment helper: calls SetBalanceMode with the given mode
+		// and logs fsm_mode before/after so you can see what the
+		// firmware does. Usage: {"command":"set_balance_mode","mode":1}
+		raw, ok := cmd["mode"]
+		if !ok {
+			return map[string]interface{}{"rc": -1.0, "error": "missing 'mode'"}, nil
+		}
+		mode, err := numericToInt(raw)
+		if err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
+		before, _ := g.loco.GetFsmMode()
+		rpcErr := g.loco.SetBalanceMode(mode)
+		time.Sleep(500 * time.Millisecond)
+		after, _ := g.loco.GetFsmMode()
+		result := map[string]interface{}{
+			"rc":                 0.0,
+			"mode_requested":     mode,
+			"fsm_mode_before":    before,
+			"fsm_mode_after":     after,
+		}
+		if rpcErr != nil {
+			result["rpc_error"] = rpcErr.Error()
+		}
+		g.logger.Infof("set_balance_mode(%d): fsm_mode %d → %d (rpc_err=%v)", mode, before, after, rpcErr)
+		return result, nil
+	case "try_fsm":
+		// Diagnostic: iterate through every FSM ID that Unitree firmware
+		// has ever published, set each, and report which ones actually
+		// move the FSM. Intended to be run once from whatever state the
+		// robot is in, to figure out which transitions the current
+		// firmware honors. Does NOT pause arm_sdk — caller should ensure
+		// arm_sdk is dormant first.
+		candidates := []int{
+			FsmZeroTorque, FsmDamp, FsmSquat, FsmSit, FsmStandUp,
+			5, 6, 7, 8, // speculative mid-range IDs some firmwares use
+			FsmStart,
+			500, // legacy Start
+			FsmLie2StandUp, FsmSquat2StandUp,
+			701, 703, 704, 705, 707, // neighbors of 702/706
+		}
+		results := []map[string]interface{}{}
+		for _, id := range candidates {
+			before, err := g.loco.GetFsmID()
+			if err != nil {
+				results = append(results, map[string]interface{}{"fsm_id": id, "error": "read_before: " + err.Error()})
+				continue
+			}
+			rpcErr := g.loco.SetFsmID(id)
+			time.Sleep(1 * time.Second)
+			after, _ := g.loco.GetFsmID()
+			entry := map[string]interface{}{
+				"fsm_id":    id,
+				"before":    before,
+				"after":     after,
+				"changed":   before != after,
+				"rpc_error": "",
+			}
+			if rpcErr != nil {
+				entry["rpc_error"] = rpcErr.Error()
+			}
+			results = append(results, entry)
+			g.logger.Infof("try_fsm: id=%d before=%d after=%d changed=%v rpc_error=%v", id, before, after, before != after, rpcErr)
+		}
+		return map[string]interface{}{"results": results}, nil
 	case "set_arm_task":
 		// Generic passthrough for any task ID, including IDs not in the
 		// armGestures map. Accepts task_id as a number.
