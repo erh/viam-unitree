@@ -81,7 +81,7 @@ typedef struct {
     float    dq;
     float    ddq;
     float    tau_est;
-    float    temperature[2];
+    int16_t  temperature[2];
     float    vol;
     uint32_t sensor[2];
     uint32_t motorstate;
@@ -93,7 +93,7 @@ typedef struct {
     float    gyroscope[3];
     float    accelerometer[3];
     float    rpy[3];
-    int32_t  temperature;
+    int16_t  temperature;
 } unitree_hg_imu_state_t;
 
 typedef struct {
@@ -104,10 +104,10 @@ typedef struct {
     uint32_t crc;
 } unitree_hg_lowcmd_t;
 
-/* LowState_ is partially decoded - we only care about mode/tick/IMU/motors.
- * The on-the-wire struct also contains BmsState_, wireless_remote[40] and a
- * trailing reserve+crc; those fields are still read but skipped/ignored by
- * the descriptor below. */
+/* LowState_ matches the official unitree_sdk2 IDL:
+ * unitree/idl/hg/LowState_.hpp. Note: no BmsState_ field exists in this
+ * type (some older community code added one, but the real wire format
+ * goes directly from motor_state[35] → wireless_remote[40]). */
 typedef struct {
     uint32_t version[2];
     uint8_t  mode_pr;
@@ -115,16 +115,6 @@ typedef struct {
     uint32_t tick;
     unitree_hg_imu_state_t imu_state;
     unitree_hg_motor_state_t motor_state[UNITREE_HG_NUM_MOTOR];
-    /* BmsState_ - 13 bytes, treated as opaque blob */
-    uint8_t  bms_version_high;
-    uint8_t  bms_version_low;
-    uint8_t  bms_status;
-    uint8_t  bms_soc;
-    int32_t  bms_current;
-    uint16_t bms_cycle;
-    int8_t   bms_bq_ntc[2];
-    int8_t   bms_mcu_ntc[2];
-    float    bms_vol;
     uint8_t  wireless_remote[40];
     uint32_t reserve[4];
     uint32_t crc;

@@ -181,8 +181,11 @@ func newG1Arm(ctx context.Context, conf resource.Config, logger logging.Logger, 
 		commanded: make([]float64, G1ArmDoF),
 	}
 
-	// Take ownership of the arms (weight=1 routes arm_sdk commands through).
-	sdk.setWeight(1.0)
+	// Arms start dormant (weight=0, no DDS writer registered). This
+	// keeps the firmware in sport mode so ready_to_move and Move work.
+	// Use the "engage" DoCommand to take ownership (weight=1) when
+	// you're ready to control the arms — this creates the DDS writer
+	// and switches firmware to low-level/arm_sdk mode.
 	logger.Infof("g1Arm (%s) initialized with %d DoF", a.sideName(), len(model.DoF()))
 	return a, nil
 }
@@ -340,17 +343,23 @@ func (a *g1Arm) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 	switch cmdStr {
 	case "release":
 		// Surrender control back to sport mode (weight=0).
-		a.sdk.setWeight(0)
+		if err := a.sdk.setWeight(0); err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
 		return map[string]interface{}{"rc": 0.0}, nil
 	case "engage":
-		a.sdk.setWeight(1)
+		if err := a.sdk.setWeight(1); err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
 		return map[string]interface{}{"rc": 0.0}, nil
 	case "set_weight":
 		w, err := numericToFloat(cmd["weight"])
 		if err != nil {
 			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
 		}
-		a.sdk.setWeight(float32(w))
+		if err := a.sdk.setWeight(float32(w)); err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
 		return map[string]interface{}{"rc": 0.0}, nil
 	case "":
 		return map[string]interface{}{}, nil

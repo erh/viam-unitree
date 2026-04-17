@@ -142,6 +142,13 @@ func pauseActiveArmSDK() func() {
 }
 
 // getArmSDK returns the shared arm SDK singleton, creating it on first use.
+//
+// The rt/arm_sdk DDS writer is NOT created here — it is lazily created
+// the first time setWeight is called with weight > 0. Just registering
+// the writer is enough for the firmware to detect an arm_sdk client and
+// enter low-level mode, which blocks all sport-service FSM transitions.
+// By deferring writer creation, the sport service stays functional
+// until the arms are actively needed.
 func getArmSDK() (*armSDK, error) {
 	armSDKMu.Lock()
 	defer armSDKMu.Unlock()
@@ -159,28 +166,29 @@ func getArmSDK() (*armSDK, error) {
 		stopCh: make(chan struct{}),
 	}
 
-	// Initialize commanded motor cmds with safe defaults (kp=0, kd=0 so
-	// nothing moves until a component sets real gains).
+	// Initialize all motor commands with mode=1 (enabled) and proper
+	// holding gains. Gains are per-motor-type from the official Unitree
+	// g1_dual_arm_example.cpp: GearboxL (knee) kp=100, others kp=40,
+	// all kd=1. For non-arm motors (legs, torso), the q position is
+	// echoed from lowstate each tick in snapshotLocked() so they hold
+	// their current position rather than commanding zero.
 	for i := range a.commanded {
-		a.commanded[i].mode = 1 // PMSM mode
+		a.commanded[i].mode = 1
+		a.commanded[i].kd = 1
+		a.commanded[i].kp = 40
 	}
+	// Knees use GearboxL → higher kp.
+	a.commanded[G1JointLeftKnee].kp = 100
+	a.commanded[G1JointRightKnee].kp = 100
 
-	cmdTopic := C.CString("rt/arm_sdk")
-	defer C.free(unsafe.Pointer(cmdTopic))
-	if rc := C.unitree_dds_create_lowcmd_writer(cmdTopic, &a.writer); rc != 0 {
-		return nil, fmt.Errorf("create arm_sdk writer failed (rc=%d)", rc)
-	}
+	// Writer is created lazily in ensureWriter() when weight > 0.
 
 	stateTopic := C.CString("rt/lowstate")
 	defer C.free(unsafe.Pointer(stateTopic))
 	if rc := C.unitree_dds_subscribe(stateTopic, 1 /* lowstate */, &a.reader); rc != 0 {
-		C.unitree_dds_close_writer(a.writer)
 		return nil, fmt.Errorf("subscribe rt/lowstate failed (rc=%d)", rc)
 	}
 
-	// Background poller for lowstate (~100 Hz); also handles control-rate
-	// publish of the latest commanded LowCmd at the same cadence so the
-	// robot keeps tracking even when joint setpoints are static.
 	a.wg.Add(1)
 	go a.run()
 
@@ -240,9 +248,25 @@ func (a *armSDK) setArmCommand(indices []int, q, kp, kd []float32) error {
 	return nil
 }
 
+// ensureWriter lazily creates the rt/arm_sdk DDS writer. Must be called
+// with a.mu held. Returns an error if the writer can't be created.
+func (a *armSDK) ensureWriter() error {
+	if a.writer != 0 {
+		return nil
+	}
+	cmdTopic := C.CString("rt/arm_sdk")
+	defer C.free(unsafe.Pointer(cmdTopic))
+	if rc := C.unitree_dds_create_lowcmd_writer(cmdTopic, &a.writer); rc != 0 {
+		return fmt.Errorf("create arm_sdk writer failed (rc=%d)", rc)
+	}
+	return nil
+}
+
 // setWeight sets the arm_sdk blending weight (0..1). When non-zero, arm_sdk
 // motor commands override the sport controller for the arm joints.
-func (a *armSDK) setWeight(w float32) {
+// The first call with w > 0 lazily creates the DDS writer on rt/arm_sdk.
+// Requires lowstate data to be available so leg positions can be echoed.
+func (a *armSDK) setWeight(w float32) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if w < 0 {
@@ -250,7 +274,16 @@ func (a *armSDK) setWeight(w float32) {
 	} else if w > 1 {
 		w = 1
 	}
+	if w > 0 {
+		if !a.hasState.Load() {
+			return fmt.Errorf("cannot engage arm_sdk: no lowstate received yet")
+		}
+		if err := a.ensureWriter(); err != nil {
+			return err
+		}
+	}
 	a.weight = w
+	return nil
 }
 
 // jointPosition returns the latest measured position of the given motor
@@ -303,7 +336,7 @@ func (a *armSDK) run() {
 			// publish a final weight=0 frame so the firmware ramps back
 			// to sport-owned arms before we go silent.
 			a.mu.Lock()
-			wasActive := a.weight > 0
+			wasActive := a.weight > 0 && a.writer != 0
 			a.weight = 0
 			a.commanded[G1ArmSDKWeightIndex].q = 0
 			cmd := a.snapshotLocked()
@@ -321,7 +354,7 @@ func (a *armSDK) run() {
 		cmd := a.snapshotLocked()
 		a.mu.Unlock()
 
-		if active && !a.paused.Load() {
+		if active && !a.paused.Load() && a.writer != 0 {
 			C.unitree_dds_publish_lowcmd(a.writer, &cmd)
 		}
 
@@ -337,11 +370,62 @@ func (a *armSDK) run() {
 }
 
 // snapshotLocked builds a LowCmd from the current commanded array. Caller
-// must hold a.mu.
+// must hold a.mu. mode_pr and mode_machine are echoed from the latest
+// LowState (required by firmware — sending 0 causes body to drop into
+// safety mode). For non-arm motors (legs, torso), current positions are
+// echoed from lowstate so they hold steady under the weight blend.
+// CRC32 is computed over the entire struct.
 func (a *armSDK) snapshotLocked() C.unitree_hg_lowcmd_t {
 	var cmd C.unitree_hg_lowcmd_t
+
+	// Echo mode fields from the latest lowstate.
+	if a.hasState.Load() {
+		cmd.mode_pr = a.latestState.mode_pr
+		cmd.mode_machine = a.latestState.mode_machine
+	}
+
 	for i := 0; i < G1NumMotors; i++ {
 		cmd.motor_cmd[i] = a.commanded[i]
 	}
+
+	// For non-arm motors (legs 0-14, and motors 30-34): echo current
+	// position from lowstate so that when weight > 0 the firmware holds
+	// these joints at their current position rather than commanding
+	// them to q=0 with zero torque (which collapses the legs).
+	if a.hasState.Load() {
+		for i := 0; i < G1JointLeftShoulderPitch; i++ {
+			cmd.motor_cmd[i].q = a.latestState.motor_state[i].q
+		}
+		for i := G1ArmSDKWeightIndex + 1; i < G1NumMotors; i++ {
+			cmd.motor_cmd[i].q = a.latestState.motor_state[i].q
+		}
+	}
+
+	// CRC32 over the entire struct excluding the crc field itself.
+	cmd.crc = crc32Unitree(unsafe.Slice((*byte)(unsafe.Pointer(&cmd)), unsafe.Sizeof(cmd)-4))
 	return cmd
+}
+
+// crc32Unitree computes the CRC-32 used by Unitree's LowCmd/LowState
+// (polynomial 0x04c11db7, no bit-reversal — matches the SDK2 example's
+// Crc32Core operating on uint32 words).
+func crc32Unitree(data []byte) C.uint32_t {
+	const poly = 0x04c11db7
+	var crc uint32 = 0
+
+	// Process 4 bytes at a time (uint32 words), big-endian interpretation
+	// matching the SDK2's (uint32_t*) cast.
+	for i := 0; i+3 < len(data); i += 4 {
+		word := uint32(data[i]) | uint32(data[i+1])<<8 |
+			uint32(data[i+2])<<16 | uint32(data[i+3])<<24
+		crc ^= word
+		for bit := 0; bit < 32; bit++ {
+			if crc&0x80000000 != 0 {
+				crc = (crc << 1) ^ poly
+			} else {
+				crc <<= 1
+			}
+		}
+	}
+	return C.uint32_t(crc)
 }
