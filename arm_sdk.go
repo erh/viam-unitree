@@ -262,6 +262,46 @@ func (a *armSDK) ensureWriter() error {
 	return nil
 }
 
+// rampWeight gradually transitions the arm_sdk weight from its current
+// value to target over duration. This avoids jarring torque spikes when
+// switching between sport and arm_sdk control. Steps at ~50 Hz (20ms).
+func (a *armSDK) rampWeight(target float32, duration time.Duration) error {
+	a.mu.Lock()
+	start := a.weight
+	a.mu.Unlock()
+
+	if target > 0 {
+		if !a.hasState.Load() {
+			return fmt.Errorf("cannot engage arm_sdk: no lowstate received yet")
+		}
+		if err := a.ensureWriterLocked(); err != nil {
+			return err
+		}
+	}
+
+	steps := int(duration / (20 * time.Millisecond))
+	if steps < 1 {
+		steps = 1
+	}
+	for i := 1; i <= steps; i++ {
+		t := float32(i) / float32(steps)
+		w := start + (target-start)*t
+		a.mu.Lock()
+		a.weight = w
+		a.mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+	}
+	return nil
+}
+
+// ensureWriterLocked creates the DDS writer if not already created.
+// NOT locked — caller must handle locking if needed, or call outside lock.
+func (a *armSDK) ensureWriterLocked() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.ensureWriter()
+}
+
 // setWeight sets the arm_sdk blending weight (0..1). When non-zero, arm_sdk
 // motor commands override the sport controller for the arm joints.
 // The first call with w > 0 lazily creates the DDS writer on rt/arm_sdk.

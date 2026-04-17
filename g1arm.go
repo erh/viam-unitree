@@ -342,13 +342,14 @@ func (a *g1Arm) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 	cmdStr, _ := cmd["command"].(string)
 	switch cmdStr {
 	case "release":
-		// Surrender control back to sport mode (weight=0).
-		if err := a.sdk.setWeight(0); err != nil {
+		// Gradually ramp weight down to surrender control back to sport.
+		if err := a.sdk.rampWeight(0, 1*time.Second); err != nil {
 			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
 		}
 		return map[string]interface{}{"rc": 0.0}, nil
 	case "engage":
-		if err := a.sdk.setWeight(1); err != nil {
+		// Gradually ramp weight up for smooth arm_sdk takeover.
+		if err := a.sdk.rampWeight(1, 1*time.Second); err != nil {
 			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
 		}
 		return map[string]interface{}{"rc": 0.0}, nil
