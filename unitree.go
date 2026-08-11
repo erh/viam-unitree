@@ -507,6 +507,45 @@ const (
 	PointFieldFloat64 uint8 = 8
 )
 
+// Unitree SLAM (slam_operate) service API IDs. From the Unitree "SLAM and
+// Navigation Services Interface" docs (service name "slam_operate", v1.0.0.1).
+// On the G1 the lidar driver publishes rt/utlidar/cloud only while the SLAM
+// stack is active, so starting mapping is what brings the point cloud online.
+const (
+	ApiSlamStartMapping int64 = 1801 // params: {"data":{"slam_type":"indoor"}}
+	ApiSlamEndMapping   int64 = 1802
+	ApiSlamInitPose     int64 = 1804
+	ApiSlamCloseSlam    int64 = 1901
+)
+
+// SlamClient controls the robot's LiDAR SLAM stack over the "slam_operate" RPC
+// service.
+type SlamClient struct {
+	rpc *RPCClient
+}
+
+// NewSlamClient creates a client for the slam_operate service.
+func NewSlamClient() (*SlamClient, error) {
+	rpc, err := NewRPCClient("slam_operate", true)
+	if err != nil {
+		return nil, err
+	}
+	return &SlamClient{rpc: rpc}, nil
+}
+
+// Operate issues a slam_operate call. paramsJSON may be "" for calls that take
+// no parameters. Returns the response JSON data.
+func (s *SlamClient) Operate(apiID int64, paramsJSON string) (string, error) {
+	data, _, err := s.rpc.Call(apiID, paramsJSON, 10000)
+	return data, err
+}
+
+func (s *SlamClient) Close() {
+	if s.rpc != nil {
+		s.rpc.Close()
+	}
+}
+
 // LidarClient subscribes to a streaming PointCloud2 DDS topic.
 type LidarClient struct {
 	mu     sync.Mutex
