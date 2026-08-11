@@ -55,6 +55,10 @@ type G1LidarConfig struct {
 	SlamStartParams string `json:"slam_start_params"`
 	SlamStopAPIID   int    `json:"slam_stop_api_id"`
 
+	// SlamTimeoutMs is how long to wait for a slam_operate reply. Starting SLAM
+	// is slow (it spins up the lidar driver), so this defaults to 30000.
+	SlamTimeoutMs int `json:"slam_timeout_ms"`
+
 	// RangeMeters is the half-width (in meters) of the 2D top-down view.
 	// The rendered image spans [-RangeMeters, +RangeMeters] in X and Y.
 	// Defaults to 10.0.
@@ -93,6 +97,7 @@ type g1Lidar struct {
 	slamStartID   int64
 	slamStartArgs string
 	slamStopID    int64
+	slamTimeoutMs int
 
 	// 2D rendering params
 	rangeMM   float64 // half-width of view, in mm
@@ -175,13 +180,17 @@ func newG1Lidar(ctx context.Context, deps resource.Dependencies, conf resource.C
 	if cfg.SlamStopAPIID != 0 {
 		slamStopID = int64(cfg.SlamStopAPIID)
 	}
+	slamTimeoutMs := 30000
+	if cfg.SlamTimeoutMs > 0 {
+		slamTimeoutMs = cfg.SlamTimeoutMs
+	}
 
 	slam, err := NewSlamClient()
 	if err != nil {
 		logger.Warnf("G1Lidar: could not create slam client: %v", err)
 	} else if cfg.StartSlamOnStartup {
 		logger.Infof("G1Lidar: starting SLAM (api=%d params=%s)", slamStartID, slamStartArgs)
-		if resp, err := slam.Operate(slamStartID, slamStartArgs); err != nil {
+		if resp, err := slam.Operate(slamStartID, slamStartArgs, slamTimeoutMs); err != nil {
 			logger.Warnf("G1Lidar: SLAM start failed: %v", err)
 		} else {
 			logger.Infof("G1Lidar: SLAM start response: %s", resp)
@@ -199,6 +208,7 @@ func newG1Lidar(ctx context.Context, deps resource.Dependencies, conf resource.C
 		slamStartID:   slamStartID,
 		slamStartArgs: slamStartArgs,
 		slamStopID:    slamStopID,
+		slamTimeoutMs: slamTimeoutMs,
 		rangeMM:       rangeMeters * 1000.0,
 		imageSize:     imageSize,
 		zFilter:       zFilter,
@@ -584,7 +594,7 @@ func (l *g1Lidar) slamOperate(apiID int64, params string) (map[string]interface{
 		return map[string]interface{}{"rc": -1.0, "error": "slam client unavailable"}, nil
 	}
 	l.logger.Infof("G1Lidar: slam_operate api=%d params=%s", apiID, params)
-	resp, err := l.slam.Operate(apiID, params)
+	resp, err := l.slam.Operate(apiID, params, l.slamTimeoutMs)
 	if err != nil {
 		return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
 	}

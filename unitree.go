@@ -534,9 +534,10 @@ func NewSlamClient() (*SlamClient, error) {
 }
 
 // Operate issues a slam_operate call. paramsJSON may be "" for calls that take
-// no parameters. Returns the response JSON data.
-func (s *SlamClient) Operate(apiID int64, paramsJSON string) (string, error) {
-	data, _, err := s.rpc.Call(apiID, paramsJSON, 10000)
+// no parameters. timeoutMs should be generous — starting SLAM spins up the
+// lidar driver and can take tens of seconds to reply. Returns the response JSON.
+func (s *SlamClient) Operate(apiID int64, paramsJSON string, timeoutMs int) (string, error) {
+	data, _, err := s.rpc.Call(apiID, paramsJSON, timeoutMs)
 	return data, err
 }
 
