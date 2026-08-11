@@ -173,9 +173,7 @@ func (b *g1Base) SetPower(ctx context.Context, linear, angular r3.Vector, extra 
 	vy := float32(linear.Y * maxLinearVel)
 	vyaw := float32(angular.Z * maxAngularVel)
 
-	b.moving.Store(vx != 0 || vy != 0 || vyaw != 0)
-	b.loco.Move(vx, vy, vyaw)
-	return nil
+	return b.startContinuousMove(vx, vy, vyaw)
 }
 
 func (b *g1Base) SetVelocity(ctx context.Context, linear, angular r3.Vector, extra map[string]interface{}) error {
@@ -185,8 +183,67 @@ func (b *g1Base) SetVelocity(ctx context.Context, linear, angular r3.Vector, ext
 	vy := float32(linear.Y / 1000.0)
 	vyaw := float32(angular.Z * math.Pi / 180.0)
 
-	b.moving.Store(vx != 0 || vy != 0 || vyaw != 0)
-	b.loco.Move(vx, vy, vyaw)
+	return b.startContinuousMove(vx, vy, vyaw)
+}
+
+// startContinuousMove keeps re-issuing Move at ~10Hz until Stop or another
+// motion command cancels it. Move itself only lasts 1s, so a single call is
+// not enough for Viam's continuous SetPower/SetVelocity semantics.
+func (b *g1Base) startContinuousMove(vx, vy, vyaw float32) error {
+	b.mu.Lock()
+	b.cancelFn()
+	moveCtx, moveFn := context.WithCancel(context.Background())
+	b.cancelCtx = moveCtx
+	b.cancelFn = moveFn
+	b.mu.Unlock()
+
+	if vx == 0 && vy == 0 && vyaw == 0 {
+		b.loco.StopMove()
+		b.moving.Store(false)
+		return nil
+	}
+
+	// Bail if Stop already cancelled us before the first Move.
+	select {
+	case <-moveCtx.Done():
+		b.moving.Store(false)
+		return nil
+	default:
+	}
+
+	// Issue the first Move synchronously so callers see failures, and so we
+	// can re-StopMove if Stop raced while the RPC was in flight.
+	if err := b.loco.Move(vx, vy, vyaw); err != nil {
+		b.moving.Store(false)
+		return err
+	}
+
+	select {
+	case <-moveCtx.Done():
+		// Stop may have run StopMove before our Move completed; a late Move
+		// would restart motion, so halt again.
+		b.loco.StopMove()
+		b.moving.Store(false)
+		return nil
+	default:
+	}
+
+	b.moving.Store(true)
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-moveCtx.Done():
+				return
+			case <-ticker.C:
+				if err := b.loco.Move(vx, vy, vyaw); err != nil {
+					b.logger.Warnf("continuous move failed: %v", err)
+				}
+			}
+		}
+	}()
 	return nil
 }
 
