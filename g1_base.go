@@ -229,6 +229,16 @@ func (b *g1Base) startContinuousMove(vx, vy, vyaw float32) error {
 	}
 
 	b.moving.Store(true)
+	// Stop may have cancelled between the check above and Store(true);
+	// don't leave IsMoving() stuck true and don't start the refresh loop.
+	select {
+	case <-moveCtx.Done():
+		b.loco.StopMove()
+		b.moving.Store(false)
+		return nil
+	default:
+	}
+
 	go func() {
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()

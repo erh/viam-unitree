@@ -660,3 +660,125 @@ func (s *StringWriter) Close() {
 		s.writer = 0
 	}
 }
+
+// OdomState is a snapshot of the G1 odometer (SportModeState) fields we expose.
+type OdomState struct {
+	Position     [3]float32 // world-frame meters: x forward, y left, z up
+	Velocity     [3]float32 // world-frame m/s
+	RPY          [3]float32 // roll, pitch, yaw (rad)
+	Quaternion   [4]float32 // w, x, y, z
+	Gyro         [3]float32 // rad/s
+	Accel        [3]float32 // m/s^2
+	YawSpeed     float32    // body-frame yaw rate, rad/s
+	BodyHeight   float32
+	ErrorCode    uint32
+	StampSec     int32
+	StampNanosec uint32
+}
+
+// OdometerClient subscribes to a SportModeState DDS topic and caches the
+// latest sample on a background poller — the same pattern as arm_sdk's
+// rt/lowstate reader (not the lidar PointCloud2 take-on-demand path).
+type OdometerClient struct {
+	mu     sync.Mutex
+	reader C.dds_entity_t
+	closed bool
+
+	latest  OdomState
+	hasData atomic.Bool
+	stopCh  chan struct{}
+	wg      sync.WaitGroup
+}
+
+// NewOdometerClient subscribes to topic (e.g. "rt/lf/odommodestate" or
+// "rt/odommodestate") and starts a background poller.
+func NewOdometerClient(topic string) (*OdometerClient, error) {
+	cTopic := C.CString(topic)
+	defer C.free(unsafe.Pointer(cTopic))
+
+	var reader C.dds_entity_t
+	rc := C.unitree_dds_subscribe(cTopic, 2 /* SportModeState */, &reader)
+	if rc != 0 {
+		return nil, fmt.Errorf("subscribe to %q failed (rc=%d)", topic, rc)
+	}
+
+	c := &OdometerClient{
+		reader: reader,
+		stopCh: make(chan struct{}),
+	}
+	c.wg.Add(1)
+	go c.poll()
+	return c, nil
+}
+
+func (c *OdometerClient) poll() {
+	defer c.wg.Done()
+	ticker := time.NewTicker(5 * time.Millisecond) // enough for 20Hz or 500Hz
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case <-ticker.C:
+		}
+
+		var raw C.unitree_go_sport_mode_state_t
+		// Non-blocking take (timeout 0), same as arm_sdk lowstate polling.
+		if rc := C.unitree_dds_take_sport_mode_state(c.reader, 0, &raw); rc != 0 {
+			continue
+		}
+
+		st := OdomState{
+			YawSpeed:     float32(raw.yaw_speed),
+			BodyHeight:   float32(raw.body_height),
+			ErrorCode:    uint32(raw.error_code),
+			StampSec:     int32(raw.stamp_sec),
+			StampNanosec: uint32(raw.stamp_nanosec),
+		}
+		for i := 0; i < 3; i++ {
+			st.Position[i] = float32(raw.position[i])
+			st.Velocity[i] = float32(raw.velocity[i])
+			st.RPY[i] = float32(raw.imu_state.rpy[i])
+			st.Gyro[i] = float32(raw.imu_state.gyroscope[i])
+			st.Accel[i] = float32(raw.imu_state.accelerometer[i])
+		}
+		for i := 0; i < 4; i++ {
+			st.Quaternion[i] = float32(raw.imu_state.quaternion[i])
+		}
+
+		c.mu.Lock()
+		c.latest = st
+		c.hasData.Store(true)
+		c.mu.Unlock()
+	}
+}
+
+// Latest returns the most recent odometer sample.
+func (c *OdometerClient) Latest() (OdomState, error) {
+	if !c.hasData.Load() {
+		return OdomState{}, fmt.Errorf("no odometer data received yet")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.latest, nil
+}
+
+func (c *OdometerClient) Close() {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.closed = true
+	reader := c.reader
+	c.mu.Unlock()
+
+	close(c.stopCh)
+	c.wg.Wait()
+	C.unitree_dds_close_subscriber(reader)
+
+	c.mu.Lock()
+	c.reader = 0
+	c.mu.Unlock()
+}

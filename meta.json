@@ -36,6 +36,11 @@
       "api": "rdk:component:arm",
       "model": "erh:viam-unitree:g1-right-arm",
       "description": "Right arm joint control for the Unitree G1 (uses arm_sdk)"
+    },
+    {
+      "api": "rdk:component:movement_sensor",
+      "model": "erh:viam-unitree:g1-movementsensor",
+      "description": "Movement sensor from the Unitree G1 odometer (position, velocity, orientation)"
     }
   ],
   "entrypoint": "viam-unitree",

@@ -6,6 +6,7 @@ toolchain go1.24.7
 
 require (
 	github.com/golang/geo v0.0.0-20230421003525-6adc56603217
+	github.com/kellydunn/golang-geo v0.7.0
 	github.com/pkg/errors v0.9.1
 	go.viam.com/rdk v0.60.0
 )
@@ -70,7 +71,6 @@ require (
 	github.com/improbable-eng/grpc-web v0.15.0 // indirect
 	github.com/jedib0t/go-pretty/v6 v6.4.6 // indirect
 	github.com/jhump/protoreflect v1.15.6 // indirect
-	github.com/kellydunn/golang-geo v0.7.0 // indirect
 	github.com/klauspost/compress v1.17.7 // indirect
 	github.com/kylelemons/go-gypsy v1.0.0 // indirect
 	github.com/lestrrat-go/backoff/v2 v2.0.8 // indirect

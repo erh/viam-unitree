@@ -159,10 +159,57 @@ typedef struct {
     char *data;
 } unitree_std_string_t;
 
+/*
+ * unitree_go::msg::dds_::SportModeState_ — used by the G1 odometer topics
+ * rt/odommodestate (500Hz) and rt/lf/odommodestate (20Hz).
+ * See: https://support.unitree.com/home/en/G1_developer/odometer_service_interface
+ *
+ * Nested IMUState_ here uses uint8 temperature (go2 IDL), unlike the HG
+ * LowState IMU which uses int16.
+ */
+typedef struct {
+    float   quaternion[4];    /* w, x, y, z */
+    float   gyroscope[3];
+    float   accelerometer[3];
+    float   rpy[3];
+    uint8_t temperature;
+} unitree_go_imu_state_t;
+
+typedef struct {
+    float t_from_start;
+    float x;
+    float y;
+    float yaw;
+    float vx;
+    float vy;
+    float vyaw;
+} unitree_go_path_point_t;
+
+typedef struct {
+    int32_t  stamp_sec;
+    uint32_t stamp_nanosec;
+    uint32_t error_code;
+    unitree_go_imu_state_t imu_state;
+    uint8_t  mode;
+    float    progress;
+    uint8_t  gait_type;
+    float    foot_raise_height;
+    float    position[3];
+    float    body_height;
+    float    velocity[3];
+    float    yaw_speed;
+    float    range_obstacle[4];
+    int16_t  foot_force[4];
+    float    foot_position_body[12];
+    float    foot_speed_body[12];
+    unitree_go_path_point_t path_point[10];
+} unitree_go_sport_mode_state_t;
+
 extern const dds_topic_descriptor_t unitree_request_desc;
 extern const dds_topic_descriptor_t unitree_response_desc;
 extern const dds_topic_descriptor_t unitree_pointcloud2_desc;
 extern const dds_topic_descriptor_t unitree_std_string_desc;
+extern const dds_topic_descriptor_t unitree_go_sport_mode_state_desc;
 
 /* Initialize the DDS participant. Returns 0 on success. */
 int unitree_dds_init(int domain_id, const char *network_interface);
@@ -190,6 +237,7 @@ void unitree_response_free(unitree_response_t *resp);
    topic_type indicates which topic descriptor to use:
      0 = PointCloud2
      1 = unitree_hg LowState (G1 low-level state)
+     2 = unitree_go SportModeState (G1 odometer)
    Returns 0 on success and writes the reader handle to *reader_out. */
 int unitree_dds_subscribe(const char *topic_name, int topic_type,
                           dds_entity_t *reader_out);
@@ -208,6 +256,11 @@ int unitree_dds_publish_lowcmd(dds_entity_t writer, const unitree_hg_lowcmd_t *c
    Returns 0 on success; the caller can read out directly (no allocations). */
 int unitree_dds_take_lowstate(dds_entity_t reader, int timeout_ms,
                               unitree_hg_lowstate_t *out);
+
+/* Take the latest SportModeState_ from a reader created with topic_type=2.
+   Returns 0 on success; the caller can read out directly (no allocations). */
+int unitree_dds_take_sport_mode_state(dds_entity_t reader, int timeout_ms,
+                                       unitree_go_sport_mode_state_t *out);
 
 /* Enumerate every remote publication (writer) the participant has discovered.
    Writes newline-separated "topic_name|type_name" entries into buf (NUL

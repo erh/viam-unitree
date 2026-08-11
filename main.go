@@ -6,6 +6,7 @@ import (
 	"go.viam.com/rdk/components/base"
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/components/generic"
+	"go.viam.com/rdk/components/movementsensor"
 	"go.viam.com/rdk/module"
 	"go.viam.com/rdk/resource"
 )
@@ -18,5 +19,6 @@ func main() {
 		resource.APIModel{API: generic.API, Model: g1Model},
 		resource.APIModel{API: arm.API, Model: g1LeftArmModel},
 		resource.APIModel{API: arm.API, Model: g1RightArmModel},
+		resource.APIModel{API: movementsensor.API, Model: g1MovementSensorModel},
 	)
 }
