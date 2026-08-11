@@ -598,6 +598,24 @@ func ListPublications() ([]string, error) {
 	return strings.Split(strings.TrimRight(s, "\n"), "\n"), nil
 }
 
+// ListSubscriptions returns every remote subscription (reader) the DDS
+// participant has discovered, as "topic_name|type_name" strings. Useful to
+// check whether a node is alive even when it publishes nothing (e.g. the
+// utlidar switch consumer).
+func ListSubscriptions() ([]string, error) {
+	const bufSize = 64 * 1024
+	buf := make([]byte, bufSize)
+	n := C.unitree_dds_list_subscriptions((*C.char)(unsafe.Pointer(&buf[0])), C.int(bufSize))
+	if n < 0 {
+		return nil, fmt.Errorf("list subscriptions failed")
+	}
+	s := C.GoString((*C.char)(unsafe.Pointer(&buf[0])))
+	if s == "" {
+		return []string{}, nil
+	}
+	return strings.Split(strings.TrimRight(s, "\n"), "\n"), nil
+}
+
 // StringWriter publishes std_msgs/String messages on a DDS topic. It is used
 // for simple control topics such as the utlidar switch ("rt/utlidar/switch"),
 // where writing "ON"/"OFF" enables/disables the lidar point-cloud stream.

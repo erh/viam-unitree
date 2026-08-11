@@ -581,16 +581,15 @@ int unitree_dds_take_lowstate(dds_entity_t reader, int timeout_ms,
     return 0;
 }
 
-int unitree_dds_list_publications(char *buf, int buf_size) {
+/* Shared helper: enumerate a builtin endpoint topic (DCPSPublication or
+   DCPSSubscription) into buf as "topic_name|type_name\n" lines. */
+static int unitree_dds_list_endpoints(dds_entity_t builtin_topic,
+                                      char *buf, int buf_size) {
     if (g_participant <= 0 || buf == NULL || buf_size <= 0)
         return -1;
     buf[0] = '\0';
 
-    /* The builtin DCPSPublication topic reports every remote writer the
-       participant has discovered. If the robot's lidar is publishing on an
-       interface we're bound to, its topic+type shows up here. */
-    dds_entity_t rd = dds_create_reader(
-        g_participant, DDS_BUILTIN_TOPIC_DCPSPUBLICATION, NULL, NULL);
+    dds_entity_t rd = dds_create_reader(g_participant, builtin_topic, NULL, NULL);
     if (rd < 0)
         return -1;
 
@@ -617,6 +616,14 @@ int unitree_dds_list_publications(char *buf, int buf_size) {
         dds_return_loan(rd, samples, n);
     dds_delete(rd);
     return count;
+}
+
+int unitree_dds_list_publications(char *buf, int buf_size) {
+    return unitree_dds_list_endpoints(DDS_BUILTIN_TOPIC_DCPSPUBLICATION, buf, buf_size);
+}
+
+int unitree_dds_list_subscriptions(char *buf, int buf_size) {
+    return unitree_dds_list_endpoints(DDS_BUILTIN_TOPIC_DCPSSUBSCRIPTION, buf, buf_size);
 }
 
 int unitree_dds_create_string_writer(const char *topic_name,

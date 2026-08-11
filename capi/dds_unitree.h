@@ -216,6 +216,11 @@ int unitree_dds_take_lowstate(dds_entity_t reader, int timeout_ms,
    the interface we're bound to. */
 int unitree_dds_list_publications(char *buf, int buf_size);
 
+/* Like unitree_dds_list_publications, but enumerates remote subscriptions
+   (readers). Useful to check whether a node (e.g. the utlidar switch consumer)
+   is alive even when it isn't publishing anything. */
+int unitree_dds_list_subscriptions(char *buf, int buf_size);
+
 /* Create a publisher for the std_msgs/String type on the given topic
    (typically "rt/utlidar/switch"). Returns 0 on success. */
 int unitree_dds_create_string_writer(const char *topic_name,

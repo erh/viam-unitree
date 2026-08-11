@@ -10,6 +10,7 @@ import (
 	"image/draw"
 	"image/png"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/golang/geo/r3"
@@ -476,6 +477,31 @@ func (l *g1Lidar) DoCommand(ctx context.Context, cmd map[string]interface{}) (ma
 			ifaces[i] = p
 		}
 		return map[string]interface{}{"rc": 0.0, "count": float64(len(pubs)), "publications": ifaces}, nil
+	case "dds_scan_subs":
+		subs, err := ListSubscriptions()
+		if err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
+		// Surface anything utlidar-related prominently: it tells us whether the
+		// lidar node is alive on the bus even when it publishes no cloud.
+		var utlidar []interface{}
+		all := make([]interface{}, len(subs))
+		for i, s := range subs {
+			all[i] = s
+			if strings.Contains(s, "utlidar") || strings.Contains(s, "lidar") {
+				utlidar = append(utlidar, s)
+			}
+		}
+		l.logger.Infof("G1Lidar dds_scan_subs: %d subscriptions; %d lidar-related", len(subs), len(utlidar))
+		for _, s := range utlidar {
+			l.logger.Infof("  lidar-related sub: %s", s)
+		}
+		return map[string]interface{}{
+			"rc":            0.0,
+			"count":         float64(len(subs)),
+			"lidar_related": utlidar,
+			"subscriptions": all,
+		}, nil
 	case "lidar_on":
 		return publish("ON")
 	case "lidar_off":
