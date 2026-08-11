@@ -23,7 +23,7 @@ var g1MovementSensorModel = resource.NewModel("erh", "viam-unitree", "g1-movemen
 type G1MovementSensorConfig struct {
 	NetworkInterface string `json:"network_interface"`
 	// Topic defaults to "rt/lf/odommodestate" (20Hz). Use "rt/odommodestate"
-	// for the 500Hz stream. Requires State Estimator >= 1.0.0.1.
+	// for the 500Hz stream. Requires Unitree State Estimator >= 1.0.0.1.
 	Topic string `json:"topic"`
 }
 
@@ -191,10 +191,11 @@ func (s *g1MovementSensor) DoCommand(ctx context.Context, cmd map[string]interfa
 func (s *g1MovementSensor) Close(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.odom != nil {
-		s.odom.Close()
-		s.odom = nil
+	if s.odom == nil {
+		return nil // already closed; don't double-release the InitDDS ref
 	}
+	s.odom.Close()
+	s.odom = nil
 	ShutdownDDS()
 	return nil
 }

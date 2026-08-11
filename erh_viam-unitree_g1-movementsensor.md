@@ -2,7 +2,7 @@
 
 Movement sensor backed by the Unitree G1 [odometer service](https://support.unitree.com/home/en/G1_developer/odometer_service_interface). Subscribes to a `SportModeState_` DDS topic and exposes orientation, linear/angular velocity, linear acceleration, and Cartesian position (via Readings).
 
-Requires State Estimator >= 1.0.0.1.
+Requires Unitree's onboard State Estimator service >= 1.0.0.1 (contact Unitree support to upgrade if topics never publish).
 
 ## Configuration
 
