@@ -730,8 +730,8 @@ type OdometerClient struct {
 	wg      sync.WaitGroup
 }
 
-// NewOdometerClient subscribes to topic (e.g. "rt/lf/odommodestate" or
-// "rt/odommodestate") and starts a background poller.
+// NewOdometerClient subscribes to topic (e.g. "rt/odommodestate" or
+// "rt/lf/odommodestate") and starts a background poller.
 func NewOdometerClient(topic string) (*OdometerClient, error) {
 	cTopic := C.CString(topic)
 	defer C.free(unsafe.Pointer(cTopic))
