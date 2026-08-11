@@ -41,10 +41,10 @@ type G1LidarConfig struct {
 	// initializes (the utlidar only publishes point clouds while enabled).
 	DisableSwitchOnStartup bool `json:"disable_switch_on_startup"`
 
-	// StartSlamOnStartup, when true, calls the SLAM start API on init. On the G1
-	// the lidar driver publishes rt/utlidar/cloud only while the SLAM stack is
-	// active, so this is what actually brings the point cloud online.
-	StartSlamOnStartup bool `json:"start_slam_on_startup"`
+	// DisableSlamOnStartup, when true, skips starting the SLAM stack at init.
+	// On the G1 the lidar driver publishes rt/utlidar/cloud only while SLAM is
+	// active, so SLAM is started by default.
+	DisableSlamOnStartup bool `json:"disable_slam_on_startup"`
 
 	// SlamStartAPIID / SlamStartParams / SlamStopAPIID control the SLAM calls.
 	// Defaults follow Unitree's slam_operate docs: start=1801 (start mapping)
@@ -188,7 +188,7 @@ func newG1Lidar(ctx context.Context, deps resource.Dependencies, conf resource.C
 	slam, err := NewSlamClient()
 	if err != nil {
 		logger.Warnf("G1Lidar: could not create slam client: %v", err)
-	} else if cfg.StartSlamOnStartup {
+	} else if !cfg.DisableSlamOnStartup {
 		logger.Infof("G1Lidar: starting SLAM (api=%d params=%s)", slamStartID, slamStartArgs)
 		if resp, err := slam.Operate(slamStartID, slamStartArgs, slamTimeoutMs); err != nil {
 			logger.Warnf("G1Lidar: SLAM start failed: %v", err)
