@@ -167,7 +167,7 @@ func (b *g1Base) Spin(ctx context.Context, angleDeg, degsPerSec float64, extra m
 
 func (b *g1Base) SetPower(ctx context.Context, linear, angular r3.Vector, extra map[string]interface{}) error {
 	const maxLinearVel = 1.5
-	const maxAngularVel = 1.0
+	const maxAngularVel = 2.0 // rad/s at full angular power; 1.0 felt dead below ~full stick
 
 	vx := float32(linear.X * maxLinearVel)
 	vy := float32(linear.Y * maxLinearVel)
