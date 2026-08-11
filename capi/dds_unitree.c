@@ -254,6 +254,29 @@ const dds_topic_descriptor_t unitree_hg_lowstate_desc = {
     .m_meta = ""
 };
 
+/* --- std_msgs::msg::dds_::String_ descriptor ---
+ *
+ * A single `string data` field. Used for simple control topics such as the
+ * utlidar switch ("rt/utlidar/switch"), where publishing "ON"/"OFF" enables
+ * or disables the lidar point-cloud stream.
+ */
+static const uint32_t unitree_std_string_ops[] = {
+    DDS_OP_ADR | DDS_OP_TYPE_STR, offsetof(unitree_std_string_t, data),
+    DDS_OP_RTS
+};
+
+const dds_topic_descriptor_t unitree_std_string_desc = {
+    .m_size = sizeof(unitree_std_string_t),
+    .m_align = sizeof(char *),
+    .m_flagset = DDS_TOPIC_NO_OPTIMIZE,
+    .m_nkeys = 0u,
+    .m_typename = "std_msgs::msg::dds_::String_",
+    .m_keys = NULL,
+    .m_nops = sizeof(unitree_std_string_ops) / sizeof(uint32_t),
+    .m_ops = unitree_std_string_ops,
+    .m_meta = ""
+};
+
 /* --- DDS infrastructure --- */
 
 static dds_entity_t g_participant = 0;
@@ -262,26 +285,24 @@ int unitree_dds_init(int domain_id, const char *network_interface) {
     if (g_participant > 0)
         return 0; /* already initialized */
 
-    /* Configure network interface via DDS environment variable if specified. */
-    if (network_interface && network_interface[0] != '\0') {
-        /* CycloneDDS uses CYCLONEDDS_URI for configuration.
-           Set the network interface via the config XML. */
+    /* Bind DDS to a specific network interface if requested. CycloneDDS only
+       reads its configuration from CYCLONEDDS_URI at participant-creation time,
+       so the env var MUST be set BEFORE dds_create_participant -- otherwise the
+       interface is silently ignored and CycloneDDS auto-selects a NIC (which
+       may not be the one the robot/lidar publishes on).
+
+       We defer to a user-provided CYCLONEDDS_URI if one is already set. */
+    if (network_interface && network_interface[0] != '\0' && !getenv("CYCLONEDDS_URI")) {
         char cfg[512];
         snprintf(cfg, sizeof(cfg),
             "<CycloneDDS><Domain><General>"
             "<Interfaces><NetworkInterface name=\"%s\"/></Interfaces>"
             "</General></Domain></CycloneDDS>",
             network_interface);
-        g_participant = dds_create_participant(domain_id, NULL, NULL);
-        if (g_participant < 0) {
-            /* Try with config */
-            setenv("CYCLONEDDS_URI", cfg, 1);
-            g_participant = dds_create_participant(domain_id, NULL, NULL);
-        }
-    } else {
-        g_participant = dds_create_participant(domain_id, NULL, NULL);
+        setenv("CYCLONEDDS_URI", cfg, 1);
     }
 
+    g_participant = dds_create_participant(domain_id, NULL, NULL);
     return (g_participant > 0) ? 0 : -1;
 }
 
@@ -558,6 +579,75 @@ int unitree_dds_take_lowstate(dds_entity_t reader, int timeout_ms,
     memcpy(out, samples[0], sizeof(*out));
     dds_return_loan(reader, samples, 1);
     return 0;
+}
+
+int unitree_dds_list_publications(char *buf, int buf_size) {
+    if (g_participant <= 0 || buf == NULL || buf_size <= 0)
+        return -1;
+    buf[0] = '\0';
+
+    /* The builtin DCPSPublication topic reports every remote writer the
+       participant has discovered. If the robot's lidar is publishing on an
+       interface we're bound to, its topic+type shows up here. */
+    dds_entity_t rd = dds_create_reader(
+        g_participant, DDS_BUILTIN_TOPIC_DCPSPUBLICATION, NULL, NULL);
+    if (rd < 0)
+        return -1;
+
+    enum { MAXS = 512 };
+    void *samples[MAXS] = { 0 };
+    dds_sample_info_t infos[MAXS];
+
+    dds_return_t n = dds_read(rd, samples, infos, MAXS, MAXS);
+    int pos = 0, count = 0;
+    for (int i = 0; i < n; i++) {
+        if (!infos[i].valid_data)
+            continue;
+        dds_builtintopic_endpoint_t *ep =
+            (dds_builtintopic_endpoint_t *)samples[i];
+        const char *tn = ep->topic_name ? ep->topic_name : "?";
+        const char *ty = ep->type_name ? ep->type_name : "?";
+        int w = snprintf(buf + pos, buf_size - pos, "%s|%s\n", tn, ty);
+        if (w > 0 && pos + w < buf_size) {
+            pos += w;
+            count++;
+        }
+    }
+    if (n > 0)
+        dds_return_loan(rd, samples, n);
+    dds_delete(rd);
+    return count;
+}
+
+int unitree_dds_create_string_writer(const char *topic_name,
+                                     dds_entity_t *writer_out) {
+    if (g_participant <= 0)
+        return -1;
+
+    dds_entity_t topic = dds_create_topic(
+        g_participant, &unitree_std_string_desc, topic_name, NULL, NULL);
+    if (topic < 0)
+        return -1;
+
+    /* Control topic: RELIABLE + KEEP_LAST(1) + TRANSIENT_LOCAL so a one-shot
+       command (e.g. "ON") is still delivered to the robot's subscriber even
+       if it is discovered slightly after we publish (latched semantics). */
+    dds_qos_t *qos = dds_create_qos();
+    dds_qset_reliability(qos, DDS_RELIABILITY_RELIABLE, DDS_SECS(1));
+    dds_qset_history(qos, DDS_HISTORY_KEEP_LAST, 1);
+    dds_qset_durability(qos, DDS_DURABILITY_TRANSIENT_LOCAL);
+    *writer_out = dds_create_writer(g_participant, topic, qos, NULL);
+    dds_delete_qos(qos);
+    if (*writer_out < 0)
+        return -1;
+    return 0;
+}
+
+int unitree_dds_publish_string(dds_entity_t writer, const char *data) {
+    unitree_std_string_t msg;
+    msg.data = (char *)data;
+    dds_return_t rc = dds_write(writer, &msg);
+    return (rc == DDS_RETCODE_OK) ? 0 : -1;
 }
 
 void unitree_dds_close_writer(dds_entity_t writer) {
