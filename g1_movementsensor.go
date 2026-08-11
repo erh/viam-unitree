@@ -83,13 +83,26 @@ func newG1MovementSensor(ctx context.Context, deps resource.Dependencies, conf r
 	}, nil
 }
 
+func (s *g1MovementSensor) client() (*OdometerClient, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.odom == nil {
+		return nil, fmt.Errorf("movementsensor closed")
+	}
+	return s.odom, nil
+}
+
 func (s *g1MovementSensor) Position(ctx context.Context, extra map[string]interface{}) (*geo.Point, float64, error) {
 	// Odometer reports local Cartesian meters, not GPS lat/lng.
 	return nil, 0, movementsensor.ErrMethodUnimplementedPosition
 }
 
 func (s *g1MovementSensor) LinearVelocity(ctx context.Context, extra map[string]interface{}) (r3.Vector, error) {
-	st, err := s.odom.Latest()
+	odom, err := s.client()
+	if err != nil {
+		return r3.Vector{}, err
+	}
+	st, err := odom.Latest()
 	if err != nil {
 		return r3.Vector{}, err
 	}
@@ -101,7 +114,11 @@ func (s *g1MovementSensor) LinearVelocity(ctx context.Context, extra map[string]
 }
 
 func (s *g1MovementSensor) AngularVelocity(ctx context.Context, extra map[string]interface{}) (spatialmath.AngularVelocity, error) {
-	st, err := s.odom.Latest()
+	odom, err := s.client()
+	if err != nil {
+		return spatialmath.AngularVelocity{}, err
+	}
+	st, err := odom.Latest()
 	if err != nil {
 		return spatialmath.AngularVelocity{}, err
 	}
@@ -114,7 +131,11 @@ func (s *g1MovementSensor) AngularVelocity(ctx context.Context, extra map[string
 }
 
 func (s *g1MovementSensor) LinearAcceleration(ctx context.Context, extra map[string]interface{}) (r3.Vector, error) {
-	st, err := s.odom.Latest()
+	odom, err := s.client()
+	if err != nil {
+		return r3.Vector{}, err
+	}
+	st, err := odom.Latest()
 	if err != nil {
 		return r3.Vector{}, err
 	}
@@ -130,7 +151,11 @@ func (s *g1MovementSensor) CompassHeading(ctx context.Context, extra map[string]
 }
 
 func (s *g1MovementSensor) Orientation(ctx context.Context, extra map[string]interface{}) (spatialmath.Orientation, error) {
-	st, err := s.odom.Latest()
+	odom, err := s.client()
+	if err != nil {
+		return nil, err
+	}
+	st, err := odom.Latest()
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +190,11 @@ func (s *g1MovementSensor) Readings(ctx context.Context, extra map[string]interf
 		return nil, err
 	}
 
-	st, err := s.odom.Latest()
+	odom, err := s.client()
+	if err != nil {
+		return nil, err
+	}
+	st, err := odom.Latest()
 	if err != nil {
 		return nil, err
 	}
@@ -190,12 +219,14 @@ func (s *g1MovementSensor) DoCommand(ctx context.Context, cmd map[string]interfa
 
 func (s *g1MovementSensor) Close(ctx context.Context) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.odom == nil {
+	odom := s.odom
+	s.odom = nil
+	s.mu.Unlock()
+
+	if odom == nil {
 		return nil // already closed; don't double-release the InitDDS ref
 	}
-	s.odom.Close()
-	s.odom = nil
+	odom.Close()
 	ShutdownDDS()
 	return nil
 }
