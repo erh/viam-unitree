@@ -277,6 +277,81 @@ const dds_topic_descriptor_t unitree_std_string_desc = {
     .m_meta = ""
 };
 
+/* --- unitree_go::msg::dds_::SportModeState_ descriptor ---
+ *
+ * Flat layout matching unitree_sdk2 go2 SportModeState_ IDL. Used by
+ * G1 odometer topics rt/odommodestate and rt/lf/odommodestate.
+ */
+static const uint32_t unitree_go_sport_mode_state_ops[] = {
+    /*  0 */ DDS_OP_ADR | DDS_OP_TYPE_4BY | DDS_OP_FLAG_SGN,
+                offsetof(unitree_go_sport_mode_state_t, stamp_sec),
+    /*  2 */ DDS_OP_ADR | DDS_OP_TYPE_4BY,
+                offsetof(unitree_go_sport_mode_state_t, stamp_nanosec),
+    /*  4 */ DDS_OP_ADR | DDS_OP_TYPE_4BY,
+                offsetof(unitree_go_sport_mode_state_t, error_code),
+    /*  6 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY,
+                offsetof(unitree_go_sport_mode_state_t, imu_state.quaternion), 4u,
+    /*  9 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY,
+                offsetof(unitree_go_sport_mode_state_t, imu_state.gyroscope), 3u,
+    /* 12 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY,
+                offsetof(unitree_go_sport_mode_state_t, imu_state.accelerometer), 3u,
+    /* 15 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY,
+                offsetof(unitree_go_sport_mode_state_t, imu_state.rpy), 3u,
+    /* 18 */ DDS_OP_ADR | DDS_OP_TYPE_1BY,
+                offsetof(unitree_go_sport_mode_state_t, imu_state.temperature),
+    /* 20 */ DDS_OP_ADR | DDS_OP_TYPE_1BY,
+                offsetof(unitree_go_sport_mode_state_t, mode),
+    /* 22 */ DDS_OP_ADR | DDS_OP_TYPE_4BY,
+                offsetof(unitree_go_sport_mode_state_t, progress),
+    /* 24 */ DDS_OP_ADR | DDS_OP_TYPE_1BY,
+                offsetof(unitree_go_sport_mode_state_t, gait_type),
+    /* 26 */ DDS_OP_ADR | DDS_OP_TYPE_4BY,
+                offsetof(unitree_go_sport_mode_state_t, foot_raise_height),
+    /* 28 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY,
+                offsetof(unitree_go_sport_mode_state_t, position), 3u,
+    /* 31 */ DDS_OP_ADR | DDS_OP_TYPE_4BY,
+                offsetof(unitree_go_sport_mode_state_t, body_height),
+    /* 33 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY,
+                offsetof(unitree_go_sport_mode_state_t, velocity), 3u,
+    /* 36 */ DDS_OP_ADR | DDS_OP_TYPE_4BY,
+                offsetof(unitree_go_sport_mode_state_t, yaw_speed),
+    /* 38 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY,
+                offsetof(unitree_go_sport_mode_state_t, range_obstacle), 4u,
+    /* 41 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_2BY | DDS_OP_FLAG_SGN,
+                offsetof(unitree_go_sport_mode_state_t, foot_force), 4u,
+    /* 44 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY,
+                offsetof(unitree_go_sport_mode_state_t, foot_position_body), 12u,
+    /* 47 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY,
+                offsetof(unitree_go_sport_mode_state_t, foot_speed_body), 12u,
+    /* 50 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_STU,
+                offsetof(unitree_go_sport_mode_state_t, path_point),
+                10u,
+                (5u << 16) | 6u, /* next_insn=5 → pos 55; elem_insn=6 → pos 56 */
+                sizeof(unitree_go_path_point_t),
+    /* 55 */ DDS_OP_RTS,
+    /* --- PathPoint_ element ops --- */
+    /* 56 */ DDS_OP_ADR | DDS_OP_TYPE_4BY, offsetof(unitree_go_path_point_t, t_from_start),
+    /* 58 */ DDS_OP_ADR | DDS_OP_TYPE_4BY, offsetof(unitree_go_path_point_t, x),
+    /* 60 */ DDS_OP_ADR | DDS_OP_TYPE_4BY, offsetof(unitree_go_path_point_t, y),
+    /* 62 */ DDS_OP_ADR | DDS_OP_TYPE_4BY, offsetof(unitree_go_path_point_t, yaw),
+    /* 64 */ DDS_OP_ADR | DDS_OP_TYPE_4BY, offsetof(unitree_go_path_point_t, vx),
+    /* 66 */ DDS_OP_ADR | DDS_OP_TYPE_4BY, offsetof(unitree_go_path_point_t, vy),
+    /* 68 */ DDS_OP_ADR | DDS_OP_TYPE_4BY, offsetof(unitree_go_path_point_t, vyaw),
+    /* 70 */ DDS_OP_RTS
+};
+
+const dds_topic_descriptor_t unitree_go_sport_mode_state_desc = {
+    .m_size = sizeof(unitree_go_sport_mode_state_t),
+    .m_align = sizeof(uint32_t),
+    .m_flagset = DDS_TOPIC_NO_OPTIMIZE,
+    .m_nkeys = 0u,
+    .m_typename = "unitree_go::msg::dds_::SportModeState_",
+    .m_keys = NULL,
+    .m_nops = sizeof(unitree_go_sport_mode_state_ops) / sizeof(uint32_t),
+    .m_ops = unitree_go_sport_mode_state_ops,
+    .m_meta = ""
+};
+
 /* --- DDS infrastructure --- */
 
 static dds_entity_t g_participant = 0;
@@ -427,6 +502,7 @@ int unitree_dds_subscribe(const char *topic_name, int topic_type,
     switch (topic_type) {
         case 0: desc = &unitree_pointcloud2_desc; break;
         case 1: desc = &unitree_hg_lowstate_desc; break;
+        case 2: desc = &unitree_go_sport_mode_state_desc; break;
         default: return -1;
     }
 
@@ -655,6 +731,35 @@ int unitree_dds_publish_string(dds_entity_t writer, const char *data) {
     msg.data = (char *)data;
     dds_return_t rc = dds_write(writer, &msg);
     return (rc == DDS_RETCODE_OK) ? 0 : -1;
+}
+
+int unitree_dds_take_sport_mode_state(dds_entity_t reader, int timeout_ms,
+                                       unitree_go_sport_mode_state_t *out) {
+    void *samples[1] = { NULL };
+    dds_sample_info_t infos[1];
+
+    dds_duration_t timeout = DDS_MSECS(timeout_ms);
+    dds_entity_t ws = dds_create_waitset(g_participant);
+    dds_entity_t cond = dds_create_readcondition(reader, DDS_ANY_STATE);
+    dds_waitset_attach(ws, cond, 0);
+
+    dds_return_t rc = dds_waitset_wait(ws, NULL, 0, timeout);
+    dds_waitset_detach(ws, cond);
+    dds_delete(cond);
+    dds_delete(ws);
+
+    if (rc <= 0)
+        return -1;
+
+    rc = dds_take(reader, samples, infos, 1, 1);
+    if (rc <= 0 || !infos[0].valid_data) {
+        if (rc > 0) dds_return_loan(reader, samples, rc);
+        return -1;
+    }
+
+    memcpy(out, samples[0], sizeof(*out));
+    dds_return_loan(reader, samples, 1);
+    return 0;
 }
 
 void unitree_dds_close_writer(dds_entity_t writer) {
