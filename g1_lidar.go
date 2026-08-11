@@ -10,6 +10,7 @@ import (
 	"image/draw"
 	"image/png"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/golang/geo/r3"
@@ -29,6 +30,16 @@ type G1LidarConfig struct {
 	NetworkInterface string `json:"network_interface"`
 	// Topic defaults to "rt/utlidar/cloud" (the standard Unitree lidar topic).
 	Topic string `json:"topic"`
+
+	// SwitchTopic is the std_msgs/String control topic used to turn the lidar
+	// on/off. Defaults to "rt/utlidar/switch". Set to "-" to disable switch
+	// control entirely (e.g. if the lidar is managed elsewhere).
+	SwitchTopic string `json:"switch_topic"`
+
+	// DisableSwitchOnStartup, when true, skips publishing "ON" to the switch
+	// topic at startup. By default the component turns the lidar on when it
+	// initializes (the utlidar only publishes point clouds while enabled).
+	DisableSwitchOnStartup bool `json:"disable_switch_on_startup"`
 
 	// RangeMeters is the half-width (in meters) of the 2D top-down view.
 	// The rendered image spans [-RangeMeters, +RangeMeters] in X and Y.
@@ -62,6 +73,7 @@ type g1Lidar struct {
 
 	logger logging.Logger
 	lidar  *LidarClient
+	sw     *StringWriter // utlidar switch control; nil if disabled
 
 	// 2D rendering params
 	rangeMM   float64 // half-width of view, in mm
@@ -109,12 +121,33 @@ func newG1Lidar(ctx context.Context, deps resource.Dependencies, conf resource.C
 		return nil, fmt.Errorf("lidar subscribe: %w", err)
 	}
 
+	// The utlidar only publishes point clouds while it is switched on. Set up a
+	// control writer and (unless disabled) turn it on now. A failure here is not
+	// fatal: the lidar may already be enabled, or switch control may not apply.
+	switchTopic := "rt/utlidar/switch"
+	if cfg.SwitchTopic != "" {
+		switchTopic = cfg.SwitchTopic
+	}
+	var sw *StringWriter
+	if switchTopic != "-" {
+		sw, err = NewStringWriter(switchTopic)
+		if err != nil {
+			logger.Warnf("G1Lidar: could not create switch writer on %q: %v", switchTopic, err)
+		} else if !cfg.DisableSwitchOnStartup {
+			logger.Infof("G1Lidar: enabling lidar via %q (ON)", switchTopic)
+			if err := sw.Publish("ON"); err != nil {
+				logger.Warnf("G1Lidar: failed to publish ON to %q: %v", switchTopic, err)
+			}
+		}
+	}
+
 	logger.Info("G1Lidar initialized")
 
 	return &g1Lidar{
 		Named:     conf.ResourceName().AsNamed(),
 		logger:    logger,
 		lidar:     lidar,
+		sw:        sw,
 		rangeMM:   rangeMeters * 1000.0,
 		imageSize: imageSize,
 		zFilter:   zFilter,
@@ -409,11 +442,84 @@ func (l *g1Lidar) Projector(ctx context.Context) (transform.Projector, error) {
 	return nil, transform.NewNoIntrinsicsError("")
 }
 
+// DoCommand supports manual control of the lidar switch:
+//
+//	{"command": "lidar_on"}         -> publish "ON" to the switch topic
+//	{"command": "lidar_off"}        -> publish "OFF" to the switch topic
+//	{"command": "switch", "value": "ON"}  -> publish an arbitrary value
 func (l *g1Lidar) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	cmdStr, _ := cmd["command"].(string)
+
+	publish := func(value string) (map[string]interface{}, error) {
+		if l.sw == nil {
+			return map[string]interface{}{"rc": -1.0, "error": "switch control disabled"}, nil
+		}
+		if err := l.sw.Publish(value); err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
+		l.logger.Infof("G1Lidar: published %q to switch", value)
+		return map[string]interface{}{"rc": 0.0}, nil
+	}
+
+	switch cmdStr {
+	case "dds_scan":
+		pubs, err := ListPublications()
+		if err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
+		// Surface it in logs too, since DoCommand output can be awkward to read.
+		l.logger.Infof("G1Lidar dds_scan: %d publications discovered", len(pubs))
+		for _, p := range pubs {
+			l.logger.Infof("  %s", p)
+		}
+		ifaces := make([]interface{}, len(pubs))
+		for i, p := range pubs {
+			ifaces[i] = p
+		}
+		return map[string]interface{}{"rc": 0.0, "count": float64(len(pubs)), "publications": ifaces}, nil
+	case "dds_scan_subs":
+		subs, err := ListSubscriptions()
+		if err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
+		// Surface anything utlidar-related prominently: it tells us whether the
+		// lidar node is alive on the bus even when it publishes no cloud.
+		var utlidar []interface{}
+		all := make([]interface{}, len(subs))
+		for i, s := range subs {
+			all[i] = s
+			if strings.Contains(s, "utlidar") || strings.Contains(s, "lidar") {
+				utlidar = append(utlidar, s)
+			}
+		}
+		l.logger.Infof("G1Lidar dds_scan_subs: %d subscriptions; %d lidar-related", len(subs), len(utlidar))
+		for _, s := range utlidar {
+			l.logger.Infof("  lidar-related sub: %s", s)
+		}
+		return map[string]interface{}{
+			"rc":            0.0,
+			"count":         float64(len(subs)),
+			"lidar_related": utlidar,
+			"subscriptions": all,
+		}, nil
+	case "lidar_on":
+		return publish("ON")
+	case "lidar_off":
+		return publish("OFF")
+	case "switch":
+		value, ok := cmd["value"].(string)
+		if !ok {
+			return map[string]interface{}{"rc": -1.0, "error": "switch requires a string 'value'"}, nil
+		}
+		return publish(value)
+	}
 	return map[string]interface{}{}, nil
 }
 
 func (l *g1Lidar) Close(ctx context.Context) error {
+	if l.sw != nil {
+		l.sw.Close()
+	}
 	l.lidar.Close()
 	ShutdownDDS()
 	return nil

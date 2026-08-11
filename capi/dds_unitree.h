@@ -153,9 +153,16 @@ typedef struct {
     uint8_t  is_dense;
 } unitree_pointcloud2_t;
 
+/* std_msgs::msg::dds_::String_ - a single string field. Used for simple
+   control topics such as the utlidar switch ("rt/utlidar/switch"). */
+typedef struct {
+    char *data;
+} unitree_std_string_t;
+
 extern const dds_topic_descriptor_t unitree_request_desc;
 extern const dds_topic_descriptor_t unitree_response_desc;
 extern const dds_topic_descriptor_t unitree_pointcloud2_desc;
+extern const dds_topic_descriptor_t unitree_std_string_desc;
 
 /* Initialize the DDS participant. Returns 0 on success. */
 int unitree_dds_init(int domain_id, const char *network_interface);
@@ -202,7 +209,29 @@ int unitree_dds_publish_lowcmd(dds_entity_t writer, const unitree_hg_lowcmd_t *c
 int unitree_dds_take_lowstate(dds_entity_t reader, int timeout_ms,
                               unitree_hg_lowstate_t *out);
 
-/* Delete a writer created by unitree_dds_create_lowcmd_writer. */
+/* Enumerate every remote publication (writer) the participant has discovered.
+   Writes newline-separated "topic_name|type_name" entries into buf (NUL
+   terminated). Returns the number of entries written, or -1 on error.
+   Useful for diagnosing whether an expected topic is being published and on
+   the interface we're bound to. */
+int unitree_dds_list_publications(char *buf, int buf_size);
+
+/* Like unitree_dds_list_publications, but enumerates remote subscriptions
+   (readers). Useful to check whether a node (e.g. the utlidar switch consumer)
+   is alive even when it isn't publishing anything. */
+int unitree_dds_list_subscriptions(char *buf, int buf_size);
+
+/* Create a publisher for the std_msgs/String type on the given topic
+   (typically "rt/utlidar/switch"). Returns 0 on success. */
+int unitree_dds_create_string_writer(const char *topic_name,
+                                     dds_entity_t *writer_out);
+
+/* Publish a std_msgs/String sample (`data`) on the given writer.
+   Returns 0 on success. */
+int unitree_dds_publish_string(dds_entity_t writer, const char *data);
+
+/* Delete a writer created by unitree_dds_create_lowcmd_writer or
+   unitree_dds_create_string_writer. */
 void unitree_dds_close_writer(dds_entity_t writer);
 
 /* Take the latest PointCloud2 from a reader. Returns 0 on success.

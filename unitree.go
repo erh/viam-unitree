@@ -19,6 +19,7 @@ import "C"
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -576,5 +577,86 @@ func (l *LidarClient) Close() {
 	if l.reader != 0 {
 		C.unitree_dds_close_subscriber(l.reader)
 		l.reader = 0
+	}
+}
+
+// ListPublications returns every remote publication the DDS participant has
+// discovered, as "topic_name|type_name" strings. Useful for diagnosing whether
+// an expected topic (e.g. rt/utlidar/cloud) is actually being published and
+// reachable on the bound network interface.
+func ListPublications() ([]string, error) {
+	const bufSize = 64 * 1024
+	buf := make([]byte, bufSize)
+	n := C.unitree_dds_list_publications((*C.char)(unsafe.Pointer(&buf[0])), C.int(bufSize))
+	if n < 0 {
+		return nil, fmt.Errorf("list publications failed")
+	}
+	s := C.GoString((*C.char)(unsafe.Pointer(&buf[0])))
+	if s == "" {
+		return []string{}, nil
+	}
+	return strings.Split(strings.TrimRight(s, "\n"), "\n"), nil
+}
+
+// ListSubscriptions returns every remote subscription (reader) the DDS
+// participant has discovered, as "topic_name|type_name" strings. Useful to
+// check whether a node is alive even when it publishes nothing (e.g. the
+// utlidar switch consumer).
+func ListSubscriptions() ([]string, error) {
+	const bufSize = 64 * 1024
+	buf := make([]byte, bufSize)
+	n := C.unitree_dds_list_subscriptions((*C.char)(unsafe.Pointer(&buf[0])), C.int(bufSize))
+	if n < 0 {
+		return nil, fmt.Errorf("list subscriptions failed")
+	}
+	s := C.GoString((*C.char)(unsafe.Pointer(&buf[0])))
+	if s == "" {
+		return []string{}, nil
+	}
+	return strings.Split(strings.TrimRight(s, "\n"), "\n"), nil
+}
+
+// StringWriter publishes std_msgs/String messages on a DDS topic. It is used
+// for simple control topics such as the utlidar switch ("rt/utlidar/switch"),
+// where writing "ON"/"OFF" enables/disables the lidar point-cloud stream.
+type StringWriter struct {
+	mu     sync.Mutex
+	writer C.dds_entity_t
+}
+
+// NewStringWriter creates a publisher on the given DDS topic.
+func NewStringWriter(topic string) (*StringWriter, error) {
+	cTopic := C.CString(topic)
+	defer C.free(unsafe.Pointer(cTopic))
+
+	var writer C.dds_entity_t
+	rc := C.unitree_dds_create_string_writer(cTopic, &writer)
+	if rc != 0 {
+		return nil, fmt.Errorf("create string writer for %q failed (rc=%d)", topic, rc)
+	}
+	return &StringWriter{writer: writer}, nil
+}
+
+// Publish writes a single std_msgs/String sample.
+func (s *StringWriter) Publish(data string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.writer == 0 {
+		return fmt.Errorf("string writer closed")
+	}
+	cData := C.CString(data)
+	defer C.free(unsafe.Pointer(cData))
+	if rc := C.unitree_dds_publish_string(s.writer, cData); rc != 0 {
+		return fmt.Errorf("publish string failed (rc=%d)", rc)
+	}
+	return nil
+}
+
+func (s *StringWriter) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.writer != 0 {
+		C.unitree_dds_close_writer(s.writer)
+		s.writer = 0
 	}
 }
