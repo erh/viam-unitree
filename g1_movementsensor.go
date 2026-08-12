@@ -22,8 +22,8 @@ var g1MovementSensorModel = resource.NewModel("erh", "viam-unitree", "g1-movemen
 // See https://support.unitree.com/home/en/G1_developer/odometer_service_interface
 type G1MovementSensorConfig struct {
 	NetworkInterface string `json:"network_interface"`
-	// Topic defaults to "rt/lf/odommodestate" (20Hz). Use "rt/odommodestate"
-	// for the 500Hz stream. Requires Unitree State Estimator >= 1.0.0.1.
+	// Topic defaults to "rt/odommodestate" (500Hz). Use "rt/lf/odommodestate"
+	// for the 20Hz stream. Requires Unitree State Estimator >= 1.0.0.1.
 	Topic string `json:"topic"`
 }
 
@@ -58,7 +58,7 @@ func newG1MovementSensor(ctx context.Context, deps resource.Dependencies, conf r
 	if cfg.NetworkInterface != "" {
 		networkInterface = cfg.NetworkInterface
 	}
-	topic := "rt/lf/odommodestate"
+	topic := "rt/odommodestate"
 	if cfg.Topic != "" {
 		topic = cfg.Topic
 	}

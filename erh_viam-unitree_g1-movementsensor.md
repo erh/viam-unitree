@@ -9,7 +9,7 @@ Requires Unitree's onboard State Estimator service >= 1.0.0.1 (contact Unitree s
 ```json
 {
   "network_interface": "eth0",
-  "topic": "rt/lf/odommodestate"
+  "topic": "rt/odommodestate"
 }
 ```
 
@@ -18,7 +18,7 @@ Requires Unitree's onboard State Estimator service >= 1.0.0.1 (contact Unitree s
 | Name                | Type   | Inclusion | Description                                                                 |
 |---------------------|--------|-----------|-----------------------------------------------------------------------------|
 | `network_interface` | string | Optional  | Network interface for DDS (default: eth0)                                   |
-| `topic`             | string | Optional  | DDS topic (default: `rt/lf/odommodestate` at 20Hz; use `rt/odommodestate` for 500Hz) |
+| `topic`             | string | Optional  | DDS topic (default: `rt/odommodestate` at 500Hz; use `rt/lf/odommodestate` for 20Hz) |
 
 ## Data
 
