@@ -32,6 +32,7 @@ type g1 struct {
 
 	logger logging.Logger
 	loco   *LocoClient
+	arm    *ArmActionClient // built-in gestures; nil if arm service unavailable
 }
 
 func newG1(ctx context.Context, deps resource.Dependencies, conf resource.Config, logger logging.Logger) (resource.Resource, error) {
@@ -57,13 +58,31 @@ func newG1(ctx context.Context, deps resource.Dependencies, conf resource.Config
 		return nil, fmt.Errorf("loco client: %w", err)
 	}
 
+	arm, err := NewArmActionClient()
+	if err != nil {
+		logger.Warnf("G1: arm action client unavailable (gestures may fail): %v", err)
+	}
+
 	logger.Info("G1 initialized successfully")
 
 	return &g1{
 		Named:  conf.ResourceName().AsNamed(),
 		logger: logger,
 		loco:   loco,
+		arm:    arm,
 	}, nil
+}
+
+// executeArmAction runs a gesture via the arm service when available, else
+// falls back to sport SetArmTask (older firmwares).
+func (g *g1) executeArmAction(taskID int) error {
+	if g.arm != nil {
+		if err := g.arm.ExecuteAction(taskID); err != nil {
+			return err
+		}
+		return nil
+	}
+	return g.loco.SetArmTask(taskID)
 }
 
 // readyToMove runs the post-boot sequence to get the G1 into a state
@@ -174,25 +193,25 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// armGestures maps DoCommand strings to the LocoClient arm-task wrappers.
-// These are pre-recorded G1 arm motions exposed by the sport service via
-// SetArmTask. They run to completion on the robot side.
+// armGestures maps DoCommand strings to arm-service action IDs (GetActionList).
+// Gestures only work in FSM 500/501/801 (not 802). Prefer FSM 501 for standing
+// gestures without engaging arm_sdk.
 var armGestures = map[string]int{
-	"wave_hand":     ArmTaskWaveHand,
-	"turn_wave":     ArmTaskTurnWave,
-	"release_arm":   ArmTaskReleaseArm,
-	"shake_hand":    ArmTaskShakeHand,
-	"high_five":     ArmTaskHighFive,
-	"hug":           ArmTaskHug,
-	"heart":         ArmTaskHeart,
-	"refuse":        ArmTaskRefuse,
-	"right_kiss":    ArmTaskRightKiss,
-	"left_kiss":     ArmTaskLeftKiss,
-	"two_hand_kiss": ArmTaskTwoHandKiss,
-	"hands_up":      ArmTaskHandsUp,
-	"clap":          ArmTaskClap,
-	"face_wave":     ArmTaskFaceWave,
-	"high_wave":     ArmTaskHighWave,
+	"wave_hand":     ArmTaskWaveHand,     // 25 wave_under_head
+	"high_wave":     ArmTaskHighWave,     // 26 wave_above_head
+	"face_wave":     ArmTaskFaceWave,     // 25
+	"turn_wave":     ArmTaskTurnWave,     // 1
+	"release_arm":   ArmTaskReleaseArm,   // 99
+	"shake_hand":    ArmTaskShakeHand,    // 27
+	"high_five":     ArmTaskHighFive,     // 18
+	"hug":           ArmTaskHug,          // 19
+	"heart":         ArmTaskHeart,        // 20
+	"refuse":        ArmTaskRefuse,       // 22
+	"right_kiss":    ArmTaskRightKiss,    // 13
+	"left_kiss":     ArmTaskLeftKiss,     // 12
+	"two_hand_kiss": ArmTaskTwoHandKiss,  // 11
+	"hands_up":      ArmTaskHandsUp,      // 15
+	"clap":          ArmTaskClap,         // 17
 }
 
 func (g *g1) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
@@ -201,12 +220,12 @@ func (g *g1) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[str
 		return map[string]interface{}{"error": "missing 'command' field"}, nil
 	}
 
-	// Built-in arm gestures triggered via SetArmTask.
+	// Built-in arm gestures triggered via the arm action service.
 	if taskID, isGesture := armGestures[cmdStr]; isGesture {
-		if err := g.loco.SetArmTask(taskID); err != nil {
-			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		if err := g.executeArmAction(taskID); err != nil {
+			return map[string]interface{}{"rc": -1.0, "action_id": float64(taskID), "error": err.Error()}, nil
 		}
-		return map[string]interface{}{"rc": 0.0}, nil
+		return map[string]interface{}{"rc": 0.0, "action_id": float64(taskID)}, nil
 	}
 
 	switch cmdStr {
@@ -361,10 +380,19 @@ func (g *g1) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[str
 		if err != nil {
 			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
 		}
-		if err := g.loco.SetArmTask(taskID); err != nil {
+		if err := g.executeArmAction(taskID); err != nil {
 			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
 		}
 		return map[string]interface{}{"rc": 0.0}, nil
+	case "list_arm_actions":
+		if g.arm == nil {
+			return map[string]interface{}{"rc": -1.0, "error": "arm action client unavailable"}, nil
+		}
+		data, err := g.arm.GetActionList()
+		if err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
+		return map[string]interface{}{"rc": 0.0, "actions": data}, nil
 	default:
 		return map[string]interface{}{"error": "unknown command: " + cmdStr}, nil
 	}
@@ -388,8 +416,13 @@ func numericToInt(v interface{}) (int, error) {
 }
 
 func (g *g1) Close(ctx context.Context) error {
+	if g.arm != nil {
+		g.arm.Close()
+		g.arm = nil
+	}
 	if g.loco != nil {
 		g.loco.Close()
+		g.loco = nil
 	}
 	ShutdownDDS()
 	return nil
