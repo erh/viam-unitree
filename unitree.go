@@ -6,9 +6,9 @@ package main
 #cgo CFLAGS: -I${SRCDIR}/build/_deps/cyclonedds-src/src/ddsrt/include
 #cgo CFLAGS: -I${SRCDIR}/build/_deps/cyclonedds-build/src/core/include
 #cgo CFLAGS: -I${SRCDIR}/build/_deps/cyclonedds-build/src/ddsrt/include
-#cgo LDFLAGS: -L${SRCDIR}/build -ldds_unitree
+#cgo LDFLAGS: -L${SRCDIR}/build -L${SRCDIR}/build/_deps/livox_sdk2-build/sdk_core -ldds_unitree -llivox_mid360 -llivox_lidar_sdk_static
 #cgo LDFLAGS: -L${SRCDIR}/build/lib -lddsc
-#cgo LDFLAGS: -lm -lpthread
+#cgo LDFLAGS: -lstdc++ -lm -lpthread
 #cgo LDFLAGS: -Wl,-rpath,${SRCDIR}/build/lib
 
 #include "dds_unitree.h"

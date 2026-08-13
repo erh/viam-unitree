@@ -20,7 +20,7 @@
     {
       "api": "rdk:component:camera",
       "model": "erh:viam-unitree:g1-lidar",
-      "description": "Lidar component for Unitree G1 (exposes point clouds via the camera API)"
+      "description": "Lidar component for Unitree G1 Mid-360 (Livox-SDK2 by default; optional Unitree DDS topic)"
     },
     {
       "api": "rdk:component:generic",

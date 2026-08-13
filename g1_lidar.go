@@ -28,39 +28,50 @@ var g1LidarModel = resource.NewModel("erh", "viam-unitree", "g1-lidar")
 
 type G1LidarConfig struct {
 	NetworkInterface string `json:"network_interface"`
-	// Topic defaults to "rt/utlidar/cloud" (the standard Unitree lidar topic).
+
+	// Source selects the point-cloud backend:
+	//   "livox" (default) — Livox-SDK2 UDP to the Mid-360 (works without Unitree's DDS lidar package)
+	//   "dds"             — subscribe to a Unitree PointCloud2 DDS topic
+	Source string `json:"source"`
+
+	// Topic is used when Source is "dds". Defaults to "rt/utlidar/cloud".
+	// For Mid-360 Unitree DDS drivers use "rt/utlidar/cloud_livox_mid360".
 	Topic string `json:"topic"`
 
 	// SwitchTopic is the std_msgs/String control topic used to turn the lidar
-	// on/off. Defaults to "rt/utlidar/switch". Set to "-" to disable switch
-	// control entirely (e.g. if the lidar is managed elsewhere).
+	// on/off (DDS mode). Defaults to "rt/utlidar/switch". Set to "-" to disable.
 	SwitchTopic string `json:"switch_topic"`
 
 	// DisableSwitchOnStartup, when true, skips publishing "ON" to the switch
-	// topic at startup. By default the component turns the lidar on when it
-	// initializes (the utlidar only publishes point clouds while enabled).
+	// topic at startup (DDS mode).
 	DisableSwitchOnStartup bool `json:"disable_switch_on_startup"`
 
-	// StartSlamOnStartup, when true, calls the SLAM start API on init. On the G1
-	// the lidar driver publishes rt/utlidar/cloud only while the SLAM stack is
-	// active, so this is what actually brings the point cloud online.
+	// StartSlamOnStartup, when true, calls the SLAM start API on init (DDS mode).
+	// On some G1 images the lidar driver publishes clouds only while SLAM is active.
 	StartSlamOnStartup bool `json:"start_slam_on_startup"`
 
 	// SlamStartAPIID / SlamStartParams / SlamStopAPIID control the SLAM calls.
-	// Defaults follow Unitree's slam_operate docs: start=1801 (start mapping)
-	// with params {"data":{"slam_type":"indoor"}}, stop=1901 (close slam).
-	// Override if your firmware uses different IDs (check ~/unitree_sdk2 on the
-	// robot).
 	SlamStartAPIID  int    `json:"slam_start_api_id"`
 	SlamStartParams string `json:"slam_start_params"`
 	SlamStopAPIID   int    `json:"slam_stop_api_id"`
 
-	// SlamTimeoutMs is how long to wait for a slam_operate reply. Starting SLAM
-	// is slow (it spins up the lidar driver), so this defaults to 30000.
+	// SlamTimeoutMs is how long to wait for a slam_operate reply. Defaults to 30000.
 	SlamTimeoutMs int `json:"slam_timeout_ms"`
 
+	// LivoxHostIP is the PC2 address Livox sends data to (default 192.168.123.164).
+	LivoxHostIP string `json:"livox_host_ip"`
+	// LivoxLidarIP is informational / reserved (default 192.168.123.120).
+	LivoxLidarIP string `json:"livox_lidar_ip"`
+	// LivoxModel is "mid360" (default) or "mid360s" (post–April 2026 Units).
+	LivoxModel string `json:"livox_model"`
+	// LivoxConfigPath, when set, uses this Livox-SDK2 JSON instead of a generated one.
+	LivoxConfigPath string `json:"livox_config_path"`
+	// LivoxFrameMs is the point-cloud assembly window (default 100 ≈ 10Hz).
+	LivoxFrameMs int `json:"livox_frame_ms"`
+	// DisableInvertMount skips the G1 upside-down (x, -y, -z) correction for Livox.
+	DisableInvertMount bool `json:"disable_invert_mount"`
+
 	// RangeMeters is the half-width (in meters) of the 2D top-down view.
-	// The rendered image spans [-RangeMeters, +RangeMeters] in X and Y.
 	// Defaults to 10.0.
 	RangeMeters float64 `json:"range_meters"`
 
@@ -69,8 +80,7 @@ type G1LidarConfig struct {
 	ImageSizePixels int `json:"image_size_pixels"`
 
 	// ZMinMeters / ZMaxMeters filter points by height (meters, in lidar frame)
-	// before projecting to 2D. Useful to slice a horizontal band near the
-	// sensor. Leave both zero to disable filtering.
+	// before projecting to 2D. Leave both zero to disable filtering.
 	ZMinMeters float64 `json:"z_min_meters"`
 	ZMaxMeters float64 `json:"z_max_meters"`
 }
@@ -90,19 +100,19 @@ type g1Lidar struct {
 	resource.AlwaysRebuild
 
 	logger logging.Logger
-	lidar  *LidarClient
-	sw     *StringWriter // utlidar switch control; nil if disabled
+	lidar  *LidarClient // DDS backend; nil when using Livox
+	livox  *LivoxClient // Livox-SDK2 backend; nil when using DDS
+	sw     *StringWriter
 
-	slam          *SlamClient // slam_operate control; nil if unavailable
+	slam          *SlamClient
 	slamStartID   int64
 	slamStartArgs string
 	slamStopID    int64
 	slamTimeoutMs int
 
-	// 2D rendering params
-	rangeMM   float64 // half-width of view, in mm
-	imageSize int     // pixels
-	zFilter   bool    // whether to apply z filter
+	rangeMM   float64
+	imageSize int
+	zFilter   bool
 	zMinMM    float64
 	zMaxMM    float64
 }
@@ -117,9 +127,10 @@ func newG1Lidar(ctx context.Context, deps resource.Dependencies, conf resource.C
 	if cfg.NetworkInterface != "" {
 		networkInterface = cfg.NetworkInterface
 	}
-	topic := "rt/utlidar/cloud"
-	if cfg.Topic != "" {
-		topic = cfg.Topic
+
+	source := strings.ToLower(cfg.Source)
+	if source == "" {
+		source = "livox"
 	}
 
 	rangeMeters := 10.0
@@ -132,42 +143,24 @@ func newG1Lidar(ctx context.Context, deps resource.Dependencies, conf resource.C
 	}
 	zFilter := cfg.ZMinMeters != 0 || cfg.ZMaxMeters != 0
 
-	logger.Infof("Initializing G1Lidar (interface=%s topic=%s range=%.2fm size=%dpx)",
-		networkInterface, topic, rangeMeters, imageSize)
+	logger.Infof("Initializing G1Lidar (source=%s interface=%s range=%.2fm size=%dpx)",
+		source, networkInterface, rangeMeters, imageSize)
 
+	out := &g1Lidar{
+		Named:     conf.ResourceName().AsNamed(),
+		logger:    logger,
+		rangeMM:   rangeMeters * 1000.0,
+		imageSize: imageSize,
+		zFilter:   zFilter,
+		zMinMM:    cfg.ZMinMeters * 1000.0,
+		zMaxMM:    cfg.ZMaxMeters * 1000.0,
+	}
+
+	// DDS is still initialized so DoCommand dds_scan / slam_* work even in Livox mode.
 	if err := InitDDS(0, networkInterface); err != nil {
 		return nil, fmt.Errorf("DDS init: %w", err)
 	}
 
-	lidar, err := NewLidarClient(topic)
-	if err != nil {
-		ShutdownDDS()
-		return nil, fmt.Errorf("lidar subscribe: %w", err)
-	}
-
-	// The utlidar only publishes point clouds while it is switched on. Set up a
-	// control writer and (unless disabled) turn it on now. A failure here is not
-	// fatal: the lidar may already be enabled, or switch control may not apply.
-	switchTopic := "rt/utlidar/switch"
-	if cfg.SwitchTopic != "" {
-		switchTopic = cfg.SwitchTopic
-	}
-	var sw *StringWriter
-	if switchTopic != "-" {
-		sw, err = NewStringWriter(switchTopic)
-		if err != nil {
-			logger.Warnf("G1Lidar: could not create switch writer on %q: %v", switchTopic, err)
-		} else if !cfg.DisableSwitchOnStartup {
-			logger.Infof("G1Lidar: enabling lidar via %q (ON)", switchTopic)
-			if err := sw.Publish("ON"); err != nil {
-				logger.Warnf("G1Lidar: failed to publish ON to %q: %v", switchTopic, err)
-			}
-		}
-	}
-
-	// SLAM control: on the G1 the lidar driver only publishes clouds while the
-	// SLAM stack is running, so this is the real enable path. Non-fatal if it
-	// can't be created.
 	slamStartID := int64(ApiSlamStartMapping)
 	if cfg.SlamStartAPIID != 0 {
 		slamStartID = int64(cfg.SlamStartAPIID)
@@ -184,41 +177,103 @@ func newG1Lidar(ctx context.Context, deps resource.Dependencies, conf resource.C
 	if cfg.SlamTimeoutMs > 0 {
 		slamTimeoutMs = cfg.SlamTimeoutMs
 	}
+	out.slamStartID = slamStartID
+	out.slamStartArgs = slamStartArgs
+	out.slamStopID = slamStopID
+	out.slamTimeoutMs = slamTimeoutMs
 
 	slam, err := NewSlamClient()
 	if err != nil {
 		logger.Warnf("G1Lidar: could not create slam client: %v", err)
-	} else if cfg.StartSlamOnStartup {
-		logger.Infof("G1Lidar: starting SLAM (api=%d params=%s)", slamStartID, slamStartArgs)
-		if resp, err := slam.Operate(slamStartID, slamStartArgs, slamTimeoutMs); err != nil {
-			logger.Warnf("G1Lidar: SLAM start failed: %v", err)
-		} else {
-			logger.Infof("G1Lidar: SLAM start response: %s", resp)
+	} else {
+		out.slam = slam
+	}
+
+	switch source {
+	case "livox":
+		invert := !cfg.DisableInvertMount
+		livox, err := NewLivoxClient(
+			cfg.LivoxConfigPath,
+			cfg.LivoxHostIP,
+			cfg.LivoxLidarIP,
+			cfg.LivoxModel,
+			cfg.LivoxFrameMs,
+			invert,
+		)
+		if err != nil {
+			out.Close(ctx)
+			return nil, fmt.Errorf("livox client: %w", err)
 		}
+		out.livox = livox
+		logger.Infof("G1Lidar: Livox-SDK2 started (host=%s model=%s invert=%v)",
+			valueOr(cfg.LivoxHostIP, defaultLivoxHostIP),
+			valueOr(cfg.LivoxModel, "mid360"),
+			invert)
+
+	case "dds":
+		topic := "rt/utlidar/cloud"
+		if cfg.Topic != "" {
+			topic = cfg.Topic
+		}
+		lidar, err := NewLidarClient(topic)
+		if err != nil {
+			out.Close(ctx)
+			return nil, fmt.Errorf("lidar subscribe: %w", err)
+		}
+		out.lidar = lidar
+
+		switchTopic := "rt/utlidar/switch"
+		if cfg.SwitchTopic != "" {
+			switchTopic = cfg.SwitchTopic
+		}
+		if switchTopic != "-" {
+			sw, err := NewStringWriter(switchTopic)
+			if err != nil {
+				logger.Warnf("G1Lidar: could not create switch writer on %q: %v", switchTopic, err)
+			} else {
+				out.sw = sw
+				if !cfg.DisableSwitchOnStartup {
+					logger.Infof("G1Lidar: enabling lidar via %q (ON)", switchTopic)
+					if err := sw.Publish("ON"); err != nil {
+						logger.Warnf("G1Lidar: failed to publish ON to %q: %v", switchTopic, err)
+					}
+				}
+			}
+		}
+
+		if out.slam != nil && cfg.StartSlamOnStartup {
+			logger.Infof("G1Lidar: starting SLAM (api=%d params=%s)", slamStartID, slamStartArgs)
+			if resp, err := out.slam.Operate(slamStartID, slamStartArgs, slamTimeoutMs); err != nil {
+				logger.Warnf("G1Lidar: SLAM start failed: %v", err)
+			} else {
+				logger.Infof("G1Lidar: SLAM start response: %s", resp)
+			}
+		}
+
+	default:
+		out.Close(ctx)
+		return nil, fmt.Errorf("unknown lidar source %q (want \"livox\" or \"dds\")", source)
 	}
 
 	logger.Info("G1Lidar initialized")
+	return out, nil
+}
 
-	return &g1Lidar{
-		Named:         conf.ResourceName().AsNamed(),
-		logger:        logger,
-		lidar:         lidar,
-		sw:            sw,
-		slam:          slam,
-		slamStartID:   slamStartID,
-		slamStartArgs: slamStartArgs,
-		slamStopID:    slamStopID,
-		slamTimeoutMs: slamTimeoutMs,
-		rangeMM:       rangeMeters * 1000.0,
-		imageSize:     imageSize,
-		zFilter:       zFilter,
-		zMinMM:        cfg.ZMinMeters * 1000.0,
-		zMaxMM:        cfg.ZMaxMeters * 1000.0,
-	}, nil
+func valueOr(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
 }
 
 // NextPointCloud is the primary API for lidar.
 func (l *g1Lidar) NextPointCloud(ctx context.Context) (pointcloud.PointCloud, error) {
+	if l.livox != nil {
+		return l.livox.Read(2000)
+	}
+	if l.lidar == nil {
+		return nil, fmt.Errorf("no lidar backend configured")
+	}
 	pc2, err := l.lidar.Read(2000)
 	if err != nil {
 		return nil, err
@@ -604,11 +659,20 @@ func (l *g1Lidar) slamOperate(apiID int64, params string) (map[string]interface{
 func (l *g1Lidar) Close(ctx context.Context) error {
 	if l.slam != nil {
 		l.slam.Close()
+		l.slam = nil
 	}
 	if l.sw != nil {
 		l.sw.Close()
+		l.sw = nil
 	}
-	l.lidar.Close()
+	if l.livox != nil {
+		l.livox.Close()
+		l.livox = nil
+	}
+	if l.lidar != nil {
+		l.lidar.Close()
+		l.lidar = nil
+	}
 	ShutdownDDS()
 	return nil
 }
