@@ -370,36 +370,77 @@ func (l *LocoClient) SetStandHeight(height float32) error {
 	return err
 }
 
-// SetArmTask triggers a built-in arm action by task ID. The G1 LocoClient
-// exposes a fixed set of pre-recorded arm motions (wave, hands-up, hug, etc.).
-// See the ArmTask* constants below for known IDs.
+// SetArmTask triggers a built-in arm action by task ID on the sport
+// service (legacy). Prefer ArmActionClient.ExecuteAction on newer G1
+// firmware, where 7106 lives on the "arm" service.
 func (l *LocoClient) SetArmTask(taskID int) error {
 	params, _ := json.Marshal(map[string]int{"data": taskID})
 	_, _, err := l.rpc.Call(ApiLocoSetArmTask, string(params), 10000)
 	return err
 }
 
-// G1 built-in arm action task IDs.
-//
-// These match the Unitree SDK2 G1 LocoClient pre-recorded arm gestures. The
-// numeric IDs come from the SDK's g1_loco_api.hpp / g1_loco_client.hpp.
-// "Release" (99) returns the arms to a neutral pose so locomotion can resume.
+// Arm action service API IDs (service name "arm"). Same numeric IDs as the
+// legacy loco SetArmTask, but on rt/api/arm/{request,response}.
 const (
-	ArmTaskReleaseArm  = 99
-	ArmTaskShakeHand   = 27
+	ApiArmExecuteAction int64 = 7106
+	ApiArmGetActionList int64 = 7107
+)
+
+// ArmActionClient wraps the G1 "arm" DDS service for built-in gestures.
+type ArmActionClient struct {
+	rpc *RPCClient
+}
+
+func NewArmActionClient() (*ArmActionClient, error) {
+	rpc, err := NewRPCClient("arm", true)
+	if err != nil {
+		return nil, err
+	}
+	return &ArmActionClient{rpc: rpc}, nil
+}
+
+// ExecuteAction runs a built-in (or release) arm action by ID.
+func (a *ArmActionClient) ExecuteAction(actionID int) error {
+	params, _ := json.Marshal(map[string]int{"data": actionID})
+	_, _, err := a.rpc.Call(ApiArmExecuteAction, string(params), 10000)
+	return err
+}
+
+// GetActionList returns the robot's JSON list of available arm actions.
+func (a *ArmActionClient) GetActionList() (string, error) {
+	data, _, err := a.rpc.Call(ApiArmGetActionList, "", 10000)
+	return data, err
+}
+
+func (a *ArmActionClient) Close() {
+	if a.rpc != nil {
+		a.rpc.Close()
+		a.rpc = nil
+	}
+}
+
+// G1 built-in arm action IDs for the "arm" DDS service (ExecuteAction / 7106).
+//
+// These match the action list returned by GetActionList (7107). Do not use
+// loco WaveHand(0)/ShakeHand(2) IDs here — on the arm service, ID 0 means
+// "list actions" and returns success with no motion.
+// "Release" (99) unlocks the arms after a holding gesture (e.g. shake).
+const (
+	ArmTaskTurnWave    = 1  // turn_back_wave
+	ArmTaskTwoHandKiss = 11 // blow_kiss_with_both_hands
+	ArmTaskLeftKiss    = 12 // blow_kiss_with_left_hand
+	ArmTaskRightKiss   = 13 // blow_kiss_with_right_hand
+	ArmTaskHandsUp     = 15 // both_hands_up
+	ArmTaskClap        = 17 // clamp / clap
 	ArmTaskHighFive    = 18
 	ArmTaskHug         = 19
-	ArmTaskHeart       = 20
-	ArmTaskRefuse      = 21
-	ArmTaskRightKiss   = 22
-	ArmTaskLeftKiss    = 23
-	ArmTaskTwoHandKiss = 24
-	ArmTaskHandsUp     = 15
-	ArmTaskClap        = 17
-	ArmTaskFaceWave    = 12
-	ArmTaskHighWave    = 13
-	ArmTaskWaveHand    = 0
-	ArmTaskTurnWave    = 1
+	ArmTaskHeart       = 20 // make_heart_with_both_hands
+	ArmTaskRefuse      = 22
+	ArmTaskWaveHand    = 25 // wave_under_head
+	ArmTaskHighWave    = 26 // wave_above_head
+	ArmTaskFaceWave    = 25 // alias of wave_under_head
+	ArmTaskShakeHand   = 27
+	ArmTaskReleaseArm  = 99
 )
 
 // High-level convenience wrappers matching the C++ SDK's LocoClient API.
@@ -416,7 +457,8 @@ func (l *LocoClient) BalanceStand() (int, error)  { return 0, l.SetBalanceMode(0
 func (l *LocoClient) HighStand() (int, error)     { return 0, l.SetStandHeight(float32(^uint32(0))) }
 func (l *LocoClient) LowStand() (int, error)      { return 0, l.SetStandHeight(0) }
 
-// Arm gesture wrappers.
+// Arm gesture wrappers (legacy sport SetArmTask). Prefer ArmActionClient
+// with the ArmTask* IDs above; sport may return 7303 on newer firmware.
 func (l *LocoClient) WaveHand() (int, error)    { return 0, l.SetArmTask(ArmTaskWaveHand) }
 func (l *LocoClient) TurnWave() (int, error)    { return 0, l.SetArmTask(ArmTaskTurnWave) }
 func (l *LocoClient) ReleaseArm() (int, error)  { return 0, l.SetArmTask(ArmTaskReleaseArm) }
