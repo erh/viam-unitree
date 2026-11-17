@@ -8,6 +8,7 @@ require (
 	github.com/golang/geo v0.0.0-20230421003525-6adc56603217
 	github.com/kellydunn/golang-geo v0.7.0
 	github.com/pkg/errors v0.9.1
+	go.uber.org/multierr v1.11.0
 	go.viam.com/rdk v0.60.0
 )
 
@@ -129,7 +130,6 @@ require (
 	go.opentelemetry.io/otel/metric v1.32.0 // indirect
 	go.opentelemetry.io/otel/trace v1.32.0 // indirect
 	go.uber.org/goleak v1.3.0 // indirect
-	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	go.viam.com/api v0.1.383 // indirect
 	go.viam.com/test v1.2.4 // indirect
