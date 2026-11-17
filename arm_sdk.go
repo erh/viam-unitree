@@ -326,6 +326,34 @@ func (a *armSDK) setWeight(w float32) error {
 	return nil
 }
 
+// ensureEngaged ramps the arm_sdk weight up to 1 if the arms are currently
+// dormant, after seeding every arm joint setpoint from the latest measured
+// positions so engaging holds the current pose instead of snapping to zero.
+// It is a no-op once already engaged, so it is safe to call on every move —
+// this is what lets UI joint-jogging work without a manual "engage" first.
+func (a *armSDK) ensureEngaged() error {
+	a.mu.Lock()
+	engaged := a.weight > 0
+	a.mu.Unlock()
+	if engaged {
+		return nil
+	}
+	if !a.hasState.Load() {
+		return fmt.Errorf("cannot engage arm_sdk: no lowstate received yet")
+	}
+	// Seed both arms to their current measured positions so the handoff holds
+	// pose rather than jerking toward q=0.
+	a.mu.Lock()
+	for _, idx := range LeftArmJointIndices {
+		a.commanded[idx].q = a.latestState.motor_state[idx].q
+	}
+	for _, idx := range RightArmJointIndices {
+		a.commanded[idx].q = a.latestState.motor_state[idx].q
+	}
+	a.mu.Unlock()
+	return a.rampWeight(1, 1*time.Second)
+}
+
 // jointPosition returns the latest measured position of the given motor
 // index, or (0, false) if no lowstate has been received yet.
 func (a *armSDK) jointPosition(idx int) (float32, bool) {
@@ -418,28 +446,26 @@ func (a *armSDK) run() {
 func (a *armSDK) snapshotLocked() C.unitree_hg_lowcmd_t {
 	var cmd C.unitree_hg_lowcmd_t
 
-	// Echo mode fields from the latest lowstate.
+	// Echo mode fields from the latest lowstate (required by firmware).
 	if a.hasState.Load() {
 		cmd.mode_pr = a.latestState.mode_pr
 		cmd.mode_machine = a.latestState.mode_machine
 	}
 
-	for i := 0; i < G1NumMotors; i++ {
-		cmd.motor_cmd[i] = a.commanded[i]
+	// Command ONLY the arm joints (15-28) plus the arm_sdk weight (motor 29).
+	// Every other motor is left at mode=0, which hands the legs/waist entirely
+	// to the locomotion controller so the robot keeps balancing while the arms
+	// move. Earlier versions echoed leg positions here with kp=40, which
+	// superimposed an independent position servo on top of the balance
+	// controller and fought it; Unitree's official g1_arm_sdk example never
+	// writes the leg motors — the weight at motor 29 blends ONLY the arms.
+	for _, idx := range LeftArmJointIndices {
+		cmd.motor_cmd[idx] = a.commanded[idx]
 	}
-
-	// For non-arm motors (legs 0-14, and motors 30-34): echo current
-	// position from lowstate so that when weight > 0 the firmware holds
-	// these joints at their current position rather than commanding
-	// them to q=0 with zero torque (which collapses the legs).
-	if a.hasState.Load() {
-		for i := 0; i < G1JointLeftShoulderPitch; i++ {
-			cmd.motor_cmd[i].q = a.latestState.motor_state[i].q
-		}
-		for i := G1ArmSDKWeightIndex + 1; i < G1NumMotors; i++ {
-			cmd.motor_cmd[i].q = a.latestState.motor_state[i].q
-		}
+	for _, idx := range RightArmJointIndices {
+		cmd.motor_cmd[idx] = a.commanded[idx]
 	}
+	cmd.motor_cmd[G1ArmSDKWeightIndex].q = a.commanded[G1ArmSDKWeightIndex].q
 
 	// CRC32 over the entire struct excluding the crc field itself.
 	cmd.crc = crc32Unitree(unsafe.Slice((*byte)(unsafe.Pointer(&cmd)), unsafe.Sizeof(cmd)-4))

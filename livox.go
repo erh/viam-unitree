@@ -184,7 +184,7 @@ func (c *LivoxClient) Read(timeoutMs int) (pointcloud.PointCloud, error) {
 		return nil, fmt.Errorf("livox returned empty cloud")
 	}
 
-	pc := pointcloud.NewWithPrealloc(count)
+	pc := pointcloud.NewBasicPointCloud(count)
 	for i := 0; i < count; i++ {
 		p := r3.Vector{
 			X: float64(xyz[i*3+0]) * 1000.0, // Viam pointcloud uses mm

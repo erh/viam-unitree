@@ -7,6 +7,8 @@ import (
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/components/movementsensor"
+	"go.viam.com/rdk/components/powersensor"
+	toggleswitch "go.viam.com/rdk/components/switch"
 	"go.viam.com/rdk/module"
 	"go.viam.com/rdk/resource"
 )
@@ -17,6 +19,8 @@ func main() {
 		resource.APIModel{API: camera.API, Model: g1CameraModel},
 		resource.APIModel{API: camera.API, Model: g1LidarModel},
 		resource.APIModel{API: generic.API, Model: g1Model},
+		resource.APIModel{API: toggleswitch.API, Model: g1SwitchModel},
+		resource.APIModel{API: powersensor.API, Model: g1BatteryModel},
 		resource.APIModel{API: arm.API, Model: g1LeftArmModel},
 		resource.APIModel{API: arm.API, Model: g1RightArmModel},
 		resource.APIModel{API: movementsensor.API, Model: g1MovementSensorModel},

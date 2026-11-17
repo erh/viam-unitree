@@ -254,6 +254,48 @@ const dds_topic_descriptor_t unitree_hg_lowstate_desc = {
     .m_meta = ""
 };
 
+/* --- unitree_hg::msg::dds_::BmsState_ descriptor ---
+ *
+ * Battery management state (topic "rt/lf/bmsstate"). All fields are scalars
+ * or arrays of primitives (no nested structs). Field order matches the
+ * unitree_sdk2 hg BmsState_ IDL. Offsets use offsetof so C struct padding is
+ * handled automatically (NO_OPTIMIZE descriptor, like the others here).
+ */
+static const uint32_t unitree_hg_bmsstate_ops[] = {
+    /*  0 */ DDS_OP_ADR | DDS_OP_TYPE_1BY, offsetof(unitree_hg_bms_state_t, version_high),
+    /*  2 */ DDS_OP_ADR | DDS_OP_TYPE_1BY, offsetof(unitree_hg_bms_state_t, version_low),
+    /*  4 */ DDS_OP_ADR | DDS_OP_TYPE_1BY, offsetof(unitree_hg_bms_state_t, fn),
+    /*  6 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_2BY,
+                offsetof(unitree_hg_bms_state_t, cell_vol), 40u,
+    /*  9 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY,
+                offsetof(unitree_hg_bms_state_t, bmsvoltage), 3u,
+    /* 12 */ DDS_OP_ADR | DDS_OP_TYPE_4BY | DDS_OP_FLAG_SGN,
+                offsetof(unitree_hg_bms_state_t, current),
+    /* 14 */ DDS_OP_ADR | DDS_OP_TYPE_1BY, offsetof(unitree_hg_bms_state_t, soc),
+    /* 16 */ DDS_OP_ADR | DDS_OP_TYPE_1BY, offsetof(unitree_hg_bms_state_t, soh),
+    /* 18 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_2BY | DDS_OP_FLAG_SGN,
+                offsetof(unitree_hg_bms_state_t, temperature), 12u,
+    /* 21 */ DDS_OP_ADR | DDS_OP_TYPE_2BY, offsetof(unitree_hg_bms_state_t, cycle),
+    /* 23 */ DDS_OP_ADR | DDS_OP_TYPE_2BY, offsetof(unitree_hg_bms_state_t, manufacturer_date),
+    /* 25 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY,
+                offsetof(unitree_hg_bms_state_t, bmsstate), 5u,
+    /* 28 */ DDS_OP_ADR | DDS_OP_TYPE_ARR | DDS_OP_SUBTYPE_4BY,
+                offsetof(unitree_hg_bms_state_t, reserve), 3u,
+    /* 31 */ DDS_OP_RTS
+};
+
+const dds_topic_descriptor_t unitree_hg_bmsstate_desc = {
+    .m_size = sizeof(unitree_hg_bms_state_t),
+    .m_align = sizeof(uint32_t),
+    .m_flagset = DDS_TOPIC_NO_OPTIMIZE,
+    .m_nkeys = 0u,
+    .m_typename = "unitree_hg::msg::dds_::BmsState_",
+    .m_keys = NULL,
+    .m_nops = sizeof(unitree_hg_bmsstate_ops) / sizeof(uint32_t),
+    .m_ops = unitree_hg_bmsstate_ops,
+    .m_meta = ""
+};
+
 /* --- std_msgs::msg::dds_::String_ descriptor ---
  *
  * A single `string data` field. Used for simple control topics such as the
@@ -503,6 +545,7 @@ int unitree_dds_subscribe(const char *topic_name, int topic_type,
         case 0: desc = &unitree_pointcloud2_desc; break;
         case 1: desc = &unitree_hg_lowstate_desc; break;
         case 2: desc = &unitree_go_sport_mode_state_desc; break;
+        case 3: desc = &unitree_hg_bmsstate_desc; break;
         default: return -1;
     }
 
@@ -735,6 +778,35 @@ int unitree_dds_publish_string(dds_entity_t writer, const char *data) {
 
 int unitree_dds_take_sport_mode_state(dds_entity_t reader, int timeout_ms,
                                        unitree_go_sport_mode_state_t *out) {
+    void *samples[1] = { NULL };
+    dds_sample_info_t infos[1];
+
+    dds_duration_t timeout = DDS_MSECS(timeout_ms);
+    dds_entity_t ws = dds_create_waitset(g_participant);
+    dds_entity_t cond = dds_create_readcondition(reader, DDS_ANY_STATE);
+    dds_waitset_attach(ws, cond, 0);
+
+    dds_return_t rc = dds_waitset_wait(ws, NULL, 0, timeout);
+    dds_waitset_detach(ws, cond);
+    dds_delete(cond);
+    dds_delete(ws);
+
+    if (rc <= 0)
+        return -1;
+
+    rc = dds_take(reader, samples, infos, 1, 1);
+    if (rc <= 0 || !infos[0].valid_data) {
+        if (rc > 0) dds_return_loan(reader, samples, rc);
+        return -1;
+    }
+
+    memcpy(out, samples[0], sizeof(*out));
+    dds_return_loan(reader, samples, 1);
+    return 0;
+}
+
+int unitree_dds_take_bmsstate(dds_entity_t reader, int timeout_ms,
+                              unitree_hg_bms_state_t *out) {
     void *samples[1] = { NULL };
     dds_sample_info_t infos[1];
 

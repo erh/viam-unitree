@@ -9,7 +9,7 @@ all: module
 build-wrapper:
 	mkdir -p $(BUILD_DIR)
 	cd $(BUILD_DIR) && cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-	cd $(BUILD_DIR) && cmake --build . -j$${NPROC:-$$(command -v nproc >/dev/null && nproc || sysctl -n hw.ncpu)}
+	cd $(BUILD_DIR) && cmake --build . -j$${NPROC:-4}
 
 # Build the Go binary (requires wrapper to be built first)
 build-go: build-wrapper
@@ -33,7 +33,7 @@ build-go: build-wrapper
 module: build-go
 	mkdir -p $(BIN_DIR)/lib
 	cp -a $(BUILD_DIR)/lib/libddsc.so* $(BIN_DIR)/lib/
-	cd $(BIN_DIR) && tar -czf ../$(BUILD_DIR)/module.tar.gz viam-unitree lib/
+	tar -czf $(BUILD_DIR)/module.tar.gz $(BIN_DIR)/viam-unitree $(BIN_DIR)/lib meta.json
 	cp meta.json $(BUILD_DIR)/
 
 clean:

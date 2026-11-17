@@ -10,10 +10,11 @@ import (
 
 	"github.com/pkg/errors"
 
+	commonpb "go.viam.com/api/common/v1"
 	"go.viam.com/rdk/components/arm"
+	"go.viam.com/rdk/grpc"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
-	"go.viam.com/rdk/referenceframe/urdf"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/spatialmath"
 )
@@ -47,14 +48,14 @@ type G1ArmConfig struct {
 	Kd []float64 `json:"kd,omitempty"`
 }
 
-func (c *G1ArmConfig) Validate(path string) ([]string, error) {
+func (c *G1ArmConfig) Validate(path string) ([]string, []string, error) {
 	if c.Kp != nil && len(c.Kp) != G1ArmDoF {
-		return nil, errors.Errorf("kp must have %d entries, got %d", G1ArmDoF, len(c.Kp))
+		return nil, nil, errors.Errorf("kp must have %d entries, got %d", G1ArmDoF, len(c.Kp))
 	}
 	if c.Kd != nil && len(c.Kd) != G1ArmDoF {
-		return nil, errors.Errorf("kd must have %d entries, got %d", G1ArmDoF, len(c.Kd))
+		return nil, nil, errors.Errorf("kd must have %d entries, got %d", G1ArmDoF, len(c.Kd))
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 func init() {
@@ -199,13 +200,13 @@ func (a *g1Arm) sideName() string {
 
 func loadArmModel(path, name string) (referenceframe.Model, error) {
 	if len(path) > 5 && path[len(path)-5:] == ".urdf" {
-		return urdf.ParseModelXMLFile(path, name)
+		return referenceframe.ParseModelXMLFile(path, name, nil)
 	}
 	return referenceframe.ParseModelJSONFile(path, name)
 }
 
-func (a *g1Arm) ModelFrame() referenceframe.Model {
-	return a.model
+func (a *g1Arm) Kinematics(ctx context.Context) (referenceframe.Model, error) {
+	return a.model, nil
 }
 
 func (a *g1Arm) JointPositions(ctx context.Context, extra map[string]interface{}) ([]referenceframe.Input, error) {
@@ -214,7 +215,7 @@ func (a *g1Arm) JointPositions(ctx context.Context, extra map[string]interface{}
 	if pos, ok := a.sdk.jointPositions(a.indices); ok {
 		out := make([]referenceframe.Input, len(pos))
 		for i, p := range pos {
-			out[i] = referenceframe.Input{Value: float64(p)}
+			out[i] = float64(p)
 		}
 		return out, nil
 	}
@@ -223,7 +224,7 @@ func (a *g1Arm) JointPositions(ctx context.Context, extra map[string]interface{}
 	defer a.mu.RUnlock()
 	out := make([]referenceframe.Input, len(a.commanded))
 	for i, p := range a.commanded {
-		out[i] = referenceframe.Input{Value: p}
+		out[i] = p
 	}
 	return out, nil
 }
@@ -233,7 +234,7 @@ func (a *g1Arm) EndPosition(ctx context.Context, extra map[string]interface{}) (
 	if err != nil {
 		return nil, err
 	}
-	return referenceframe.ComputeOOBPosition(a.model, joints)
+	return a.model.Transform(joints)
 }
 
 func (a *g1Arm) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
@@ -277,17 +278,24 @@ func (a *g1Arm) commandPositions(ctx context.Context, positions []referenceframe
 
 	q := make([]float32, len(positions))
 	for i, p := range positions {
-		q[i] = float32(p.Value)
+		q[i] = float32(p)
 	}
 
 	a.mu.Lock()
 	for i, p := range positions {
-		a.commanded[i] = p.Value
+		a.commanded[i] = p
 	}
 	a.lastCmdTime = time.Now()
 	a.mu.Unlock()
 
 	a.moving.Store(true)
+	// Auto-engage: take arm_sdk ownership (weight→1) on the first move so
+	// jogging from the UI works without a manual "engage" DoCommand. No-op
+	// once already engaged.
+	if err := a.sdk.ensureEngaged(); err != nil {
+		a.moving.Store(false)
+		return err
+	}
 	if err := a.sdk.setArmCommand(a.indices, q, a.kp, a.kd); err != nil {
 		a.moving.Store(false)
 		return err
@@ -336,6 +344,55 @@ func (a *g1Arm) Geometries(ctx context.Context, extra map[string]interface{}) ([
 		return nil, err
 	}
 	return gif.Geometries(), nil
+}
+
+// MoveThroughJointPositionsStreamed executes a streamed trajectory by applying
+// each waypoint in order. We have no time model, so per-point Time/Constraints
+// are ignored; we command each waypoint and acknowledge once per batch.
+func (a *g1Arm) MoveThroughJointPositionsStreamed(
+	ctx context.Context,
+	batches <-chan []arm.TrajectoryPoint,
+	responses chan<- arm.Response,
+	_ map[string]interface{},
+) error {
+	for batch := range batches {
+		for _, p := range batch {
+			if err := a.MoveToJointPositions(ctx, p.Positions, nil); err != nil {
+				return err
+			}
+		}
+		select {
+		case responses <- arm.Response{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// Get3DModels returns the visual meshes the arm's kinematic model carries,
+// keyed by link. The embedded G1 arm models ship none, so this is empty.
+func (a *g1Arm) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
+	models := referenceframe.VisualMeshes(a.model)
+	if models == nil {
+		models = map[string]*commonpb.Mesh{}
+	}
+	return models, nil
+}
+
+func (a *g1Arm) Properties(ctx context.Context, extra map[string]interface{}) (arm.Properties, error) {
+	return arm.Properties{
+		SupportManualMode:        false,
+		SupportCartesianCommands: false,
+	}, nil
+}
+
+func (a *g1Arm) SetManualMode(ctx context.Context, manualMode bool, enabledFor time.Duration, extra map[string]interface{}) error {
+	return grpc.UnimplementedError
+}
+
+func (a *g1Arm) ManualMode(ctx context.Context, extra map[string]interface{}) (bool, error) {
+	return false, grpc.UnimplementedError
 }
 
 func (a *g1Arm) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {

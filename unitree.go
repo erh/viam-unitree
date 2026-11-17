@@ -864,3 +864,136 @@ func (c *OdometerClient) Close() {
 	c.reader = 0
 	c.mu.Unlock()
 }
+
+// BmsState is a snapshot of the G1 battery (BmsState_) fields we expose.
+//
+// Voltage/Current scaling (mV/mA -> V/A) follows the common convention for the
+// hg BmsState type; verify against a known-good reading on first use. SOC/SOH
+// are integer percent as published.
+type BmsState struct {
+	SOC      int     // state of charge, percent (0..100)
+	SOH      int     // state of health, percent (0..100)
+	Current  float64 // pack current, amps (negative = discharging)
+	Voltage  float64 // pack voltage, volts
+	Cycle    int     // charge/discharge cycle count
+	MaxTempC float64 // hottest pack temperature sensor, deg C
+	MinTempC float64 // coldest pack temperature sensor, deg C
+}
+
+// BmsClient subscribes to the G1 battery topic ("rt/lf/bmsstate") and caches
+// the latest sample on a background poller (same pattern as OdometerClient).
+type BmsClient struct {
+	mu     sync.Mutex
+	reader C.dds_entity_t
+	closed bool
+
+	latest  BmsState
+	hasData atomic.Bool
+	stopCh  chan struct{}
+	wg      sync.WaitGroup
+}
+
+// NewBmsClient subscribes to topic (e.g. "rt/lf/bmsstate") and starts a poller.
+func NewBmsClient(topic string) (*BmsClient, error) {
+	cTopic := C.CString(topic)
+	defer C.free(unsafe.Pointer(cTopic))
+
+	var reader C.dds_entity_t
+	rc := C.unitree_dds_subscribe(cTopic, 3 /* BmsState */, &reader)
+	if rc != 0 {
+		return nil, fmt.Errorf("subscribe to %q failed (rc=%d)", topic, rc)
+	}
+
+	c := &BmsClient{reader: reader, stopCh: make(chan struct{})}
+	c.wg.Add(1)
+	go c.poll()
+	return c, nil
+}
+
+func (c *BmsClient) poll() {
+	defer c.wg.Done()
+	ticker := time.NewTicker(1 * time.Second) // battery state changes slowly
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case <-ticker.C:
+		}
+
+		var raw C.unitree_hg_bms_state_t
+		if rc := C.unitree_dds_take_bmsstate(c.reader, 0, &raw); rc != 0 {
+			continue
+		}
+
+		// Pack temperature: report the hottest/coldest *populated* sensor.
+		// Unused sensor slots read 0, so skip zeros when finding the min.
+		maxT := int16(-32768)
+		minT := int16(32767)
+		haveTemp := false
+		for i := 0; i < 12; i++ {
+			t := int16(raw.temperature[i])
+			if t == 0 {
+				continue
+			}
+			haveTemp = true
+			if t > maxT {
+				maxT = t
+			}
+			if t < minT {
+				minT = t
+			}
+		}
+		if !haveTemp {
+			maxT, minT = 0, 0
+		}
+
+		st := BmsState{
+			SOC: int(raw.soc),
+			SOH: int(raw.soh),
+			// Unitree reports current negative when discharging. Negate so a
+			// discharging robot reads positive (power being drawn from the
+			// pack); charging then reads negative.
+			Current:  -float64(int32(raw.current)) / 1000.0,       // mA -> A
+			Voltage:  float64(uint32(raw.bmsvoltage[0])) / 1000.0, // mV -> V
+			Cycle:    int(raw.cycle),
+			MaxTempC: float64(maxT),
+			MinTempC: float64(minT),
+		}
+
+		c.mu.Lock()
+		c.latest = st
+		c.hasData.Store(true)
+		c.mu.Unlock()
+	}
+}
+
+// Latest returns the most recent battery sample.
+func (c *BmsClient) Latest() (BmsState, error) {
+	if !c.hasData.Load() {
+		return BmsState{}, fmt.Errorf("no battery data received yet")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.latest, nil
+}
+
+func (c *BmsClient) Close() {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.closed = true
+	reader := c.reader
+	c.mu.Unlock()
+
+	close(c.stopCh)
+	c.wg.Wait()
+	C.unitree_dds_close_subscriber(reader)
+
+	c.mu.Lock()
+	c.reader = 0
+	c.mu.Unlock()
+}

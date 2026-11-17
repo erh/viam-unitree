@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"image"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,12 +13,11 @@ import (
 
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/components/camera/videosource"
-	"go.viam.com/rdk/gostream"
+	"go.viam.com/rdk/data"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/resource"
-	"go.viam.com/rdk/rimage"
-	"go.viam.com/rdk/rimage/transform"
+	"go.viam.com/rdk/spatialmath"
 	rdkutils "go.viam.com/rdk/utils"
 )
 
@@ -31,8 +29,12 @@ const (
 
 	// The RealSense exposes several V4L2 nodes (depth Z16, infrared, color,
 	// metadata). Only the color node offers YUYV, so constraining on it
-	// selects the RGB stream instead of whichever node enumerates first.
-	defaultCameraFormat = "YUY2"
+	// selects the RGB stream regardless of which /dev/videoN it enumerates as
+	// (the numbering shuffles across boots). NOTE: this must be the
+	// mediadevices frame-format string "YUYV" (V4L2_PIX_FMT_YUYV), NOT "YUY2"
+	// — they are distinct constants in mediadevices and the device advertises
+	// YUYV.
+	defaultCameraFormat = "YUYV"
 )
 
 type G1CameraConfig struct {
@@ -54,16 +56,16 @@ type G1CameraConfig struct {
 	NetworkInterface string `json:"network_interface,omitempty"`
 }
 
-func (c *G1CameraConfig) Validate(path string) ([]string, error) {
+func (c *G1CameraConfig) Validate(path string) ([]string, []string, error) {
 	switch c.Source {
 	case "", cameraSourceV4L2, cameraSourceVideohub:
 	default:
-		return nil, fmt.Errorf("%s: unknown source %q (want %q or %q)", path, c.Source, cameraSourceV4L2, cameraSourceVideohub)
+		return nil, nil, fmt.Errorf("%s: unknown source %q (want %q or %q)", path, c.Source, cameraSourceV4L2, cameraSourceVideohub)
 	}
 	if c.Width < 0 || c.Height < 0 || c.FrameRate < 0 {
-		return nil, fmt.Errorf("%s: width_px, height_px and frame_rate must be non-negative", path)
+		return nil, nil, fmt.Errorf("%s: width_px, height_px and frame_rate must be non-negative", path)
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 func init() {
@@ -80,6 +82,11 @@ func newG1Camera(ctx context.Context, deps resource.Dependencies, conf resource.
 	if cfg.Source == cameraSourceVideohub {
 		return newG1VideohubCamera(conf, cfg, logger)
 	}
+	// Default / "v4l2". NOTE: on this G1 the RealSense color node is held open
+	// by the robot's own vision stack, so the raw device reports "busy" and the
+	// only Unitree-side feeds are the videohub RPC (no response topic → times
+	// out) and a WebRTC stream — neither is a consumable DDS image topic. v4l2
+	// works only once the device is freed (stop whatever holds /dev/video*).
 	return newG1V4L2Camera(ctx, deps, conf, cfg, logger)
 }
 
@@ -95,39 +102,78 @@ func newG1V4L2Camera(
 	cfg *G1CameraConfig,
 	logger logging.Logger,
 ) (camera.Camera, error) {
-	format := cfg.Format
-	if format == "" {
-		format = defaultCameraFormat
+	// Formats to try, in order. If the user pinned a format, honor only that.
+	// Otherwise try the preferred YUYV color format, then MJPEG, then let the
+	// Candidate devices, in preference order: the configured video_path (if
+	// any), then every detected RealSense node, then "any device". video_path
+	// is a preference, NOT exclusive — if it points at a node that can't give a
+	// color image (e.g. the platform /dev/video0 or a depth node), we fall
+	// through to the RealSense color node instead of serving black frames.
+	var candidates []string
+	if cfg.VideoPath != "" {
+		candidates = append(candidates, cfg.VideoPath)
+	}
+	candidates = append(candidates, findRealSenseVideoDevices(logger)...)
+	candidates = append(candidates, "") // any device, last resort
+
+	// Formats to try. If the user pinned a format, honor only that. Otherwise
+	// try REAL color formats (YUYV then MJPEG) across every candidate first.
+	// We deliberately do NOT fall back to letting the driver auto-pick a
+	// format: auto-pick happily matches a depth/greyscale/platform node and
+	// yields an all-black image, which is worse than a clear error.
+	colorFormats := []string{defaultCameraFormat, "MJPEG"}
+	if cfg.Format != "" {
+		colorFormats = []string{cfg.Format}
 	}
 
-	candidates := []string{cfg.VideoPath}
-	if cfg.VideoPath == "" {
-		candidates = append(findRealSenseVideoDevices(logger), "")
+	// The RealSense color node won't match a bare format — the webcam driver
+	// needs an explicit mode (width/height) to resolve a stream, otherwise
+	// every format "fails to find a queryable driver that matches the config
+	// constraints". Try a couple of modes the 435i color stream always
+	// supports. Config width/height, when set, is used exclusively.
+	type mode struct{ w, h int }
+	modes := []mode{{cfg.Width, cfg.Height}}
+	if cfg.Width == 0 || cfg.Height == 0 {
+		modes = []mode{{640, 480}, {1280, 720}}
+	}
+	frameRate := cfg.FrameRate
+	if frameRate == 0 {
+		frameRate = 30
 	}
 
-	var errs error
-	for _, path := range candidates {
+	tryOpen := func(path, format string, w, h int) (camera.Camera, error) {
 		wcConf := conf
 		wcConf.ConvertedAttributes = &videosource.WebcamConfig{
 			Path:      path,
 			Format:    format,
-			Width:     cfg.Width,
-			Height:    cfg.Height,
-			FrameRate: cfg.FrameRate,
+			Width:     w,
+			Height:    h,
+			FrameRate: frameRate,
 		}
-		label := path
-		if label == "" {
-			label = "<any device>"
-		}
-		cam, err := videosource.NewWebcam(ctx, deps, wcConf, logger)
-		if err == nil {
-			logger.Infof("G1Camera using V4L2 device %s (format %s)", label, format)
-			return cam, nil
-		}
-		logger.Debugf("G1Camera: cannot open %s: %v", label, err)
-		errs = multierr.Append(errs, fmt.Errorf("%s: %w", label, err))
+		return videosource.NewWebcam(ctx, deps, wcConf, logger)
 	}
-	return nil, fmt.Errorf("no usable V4L2 camera with format %s found (is the module running on the G1 dev computer with the head camera attached? set video_path to choose a device): %w", format, errs)
+
+	var errs error
+	// Format- and mode-outer so a real color mode is tried on the RealSense
+	// node before giving up on an earlier (possibly wrong) candidate device.
+	for _, format := range colorFormats {
+		for _, m := range modes {
+			for _, path := range candidates {
+				label := path
+				if label == "" {
+					label = "<any device>"
+				}
+				cam, err := tryOpen(path, format, m.w, m.h)
+				if err == nil {
+					logger.Infof("G1Camera using V4L2 device %s (format %s %dx%d)", label, format, m.w, m.h)
+					return cam, nil
+				}
+				logger.Debugf("G1Camera: cannot open %s (%s %dx%d): %v", label, format, m.w, m.h, err)
+				errs = multierr.Append(errs, fmt.Errorf("%s/%s/%dx%d: %w", label, format, m.w, m.h, err))
+			}
+		}
+	}
+	return nil, fmt.Errorf("no usable color V4L2 camera found (is the module running on the G1 dev computer with the head camera attached? set video_path/format to choose a device): %w", errs)
 }
 
 // findRealSenseVideoDevices returns /dev/videoN paths whose V4L2 name
@@ -201,47 +247,24 @@ func (c *g1VideohubCamera) getImage() ([]byte, error) {
 	return data, nil
 }
 
-func (c *g1VideohubCamera) Image(ctx context.Context, mimeType string, extra map[string]interface{}) ([]byte, camera.ImageMetadata, error) {
-	jpegData, err := c.getImage()
-	if err != nil {
-		return nil, camera.ImageMetadata{}, err
-	}
-	return jpegData, camera.ImageMetadata{MimeType: rdkutils.MimeTypeJPEG}, nil
-}
-
-func (c *g1VideohubCamera) Images(ctx context.Context) ([]camera.NamedImage, resource.ResponseMetadata, error) {
+func (c *g1VideohubCamera) Images(
+	ctx context.Context,
+	filterSourceNames []string,
+	extra map[string]interface{},
+) ([]camera.NamedImage, resource.ResponseMetadata, error) {
 	jpegData, err := c.getImage()
 	if err != nil {
 		return nil, resource.ResponseMetadata{}, err
 	}
 
-	img, err := rimage.DecodeImage(ctx, jpegData, rdkutils.MimeTypeJPEG)
+	ni, err := camera.NamedImageFromBytes(jpegData, c.Name().ShortName(), rdkutils.MimeTypeJPEG, data.Annotations{})
 	if err != nil {
-		return nil, resource.ResponseMetadata{}, fmt.Errorf("decode jpeg: %w", err)
+		return nil, resource.ResponseMetadata{}, fmt.Errorf("named image: %w", err)
 	}
-
-	return []camera.NamedImage{
-			{Image: img, SourceName: c.Name().ShortName()},
-		}, resource.ResponseMetadata{
-			CapturedAt: time.Now(),
-		}, nil
+	return []camera.NamedImage{ni}, resource.ResponseMetadata{CapturedAt: time.Now()}, nil
 }
 
-func (c *g1VideohubCamera) Stream(ctx context.Context, errHandlers ...gostream.ErrorHandler) (gostream.VideoStream, error) {
-	return gostream.NewEmbeddedVideoStreamFromReader(gostream.VideoReaderFunc(func(ctx context.Context) (image.Image, func(), error) {
-		jpegData, err := c.getImage()
-		if err != nil {
-			return nil, nil, err
-		}
-		img, err := rimage.DecodeImage(ctx, jpegData, rdkutils.MimeTypeJPEG)
-		if err != nil {
-			return nil, nil, fmt.Errorf("decode jpeg: %w", err)
-		}
-		return img, func() {}, nil
-	})), nil
-}
-
-func (c *g1VideohubCamera) NextPointCloud(ctx context.Context) (pointcloud.PointCloud, error) {
+func (c *g1VideohubCamera) NextPointCloud(ctx context.Context, extra map[string]interface{}) (pointcloud.PointCloud, error) {
 	return nil, fmt.Errorf("point cloud not supported")
 }
 
@@ -253,8 +276,8 @@ func (c *g1VideohubCamera) Properties(ctx context.Context) (camera.Properties, e
 	}, nil
 }
 
-func (c *g1VideohubCamera) Projector(ctx context.Context) (transform.Projector, error) {
-	return nil, transform.NewNoIntrinsicsError("")
+func (c *g1VideohubCamera) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
+	return nil, nil
 }
 
 func (c *g1VideohubCamera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {

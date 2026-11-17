@@ -52,6 +52,13 @@ if(NOT livox_sdk2_POPULATED)
             target_compile_options(${_livox_tgt} PRIVATE -Wno-error)
         endif()
     endforeach()
+    # We only link the static Livox lib. Exclude the shared lib from the
+    # default build so CI doesn't compile Livox twice — the extra parallel
+    # C++ load (rapidjson-heavy command handlers) was OOM-ing the linux/amd64
+    # cloud builder, which compiles CycloneDDS and Livox from source together.
+    if(TARGET livox_lidar_sdk_shared)
+        set_target_properties(livox_lidar_sdk_shared PROPERTIES EXCLUDE_FROM_ALL TRUE)
+    endif()
 endif()
 
 add_library(livox_mid360 STATIC capi/livox_mid360.cpp)

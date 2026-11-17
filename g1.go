@@ -16,8 +16,8 @@ type G1Config struct {
 	NetworkInterface string `json:"network_interface"`
 }
 
-func (c *G1Config) Validate(path string) ([]string, error) {
-	return nil, nil
+func (c *G1Config) Validate(path string) ([]string, []string, error) {
+	return nil, nil, nil
 }
 
 func init() {
@@ -96,39 +96,45 @@ func (g *g1) executeArmAction(taskID int) error {
 // The manual DoCommand equivalents of these 4 calls were verified to
 // leave both walking and camera functional.
 func (g *g1) readyToMove(ctx context.Context) error {
-	g.logger.Info("readyToMove: Damp")
-	if err := g.loco.SetFsmID(FsmDamp); err != nil {
-		g.logger.Warnf("readyToMove: Damp RPC error (may already be in state): %v", err)
+	return runReadyToMove(ctx, g.loco, g.logger)
+}
+
+// runReadyToMove is the shared post-boot sequence, usable by any component
+// holding a LocoClient (the g1 generic component and the g1-mode switch).
+func runReadyToMove(ctx context.Context, loco *LocoClient, logger logging.Logger) error {
+	logger.Info("readyToMove: Damp")
+	if err := loco.SetFsmID(FsmDamp); err != nil {
+		logger.Warnf("readyToMove: Damp RPC error (may already be in state): %v", err)
 	}
 	if err := sleepCtx(ctx, 1*time.Second); err != nil {
 		return err
 	}
 
-	g.logger.Info("readyToMove: StandUp")
-	if err := g.loco.SetFsmID(FsmStandUp); err != nil {
+	logger.Info("readyToMove: StandUp")
+	if err := loco.SetFsmID(FsmStandUp); err != nil {
 		return fmt.Errorf("stand_up: %w", err)
 	}
 	if err := sleepCtx(ctx, 5*time.Second); err != nil {
 		return err
 	}
 
-	g.logger.Info("readyToMove: SetBalanceMode(1)")
-	if err := g.loco.SetBalanceMode(1); err != nil {
+	logger.Info("readyToMove: SetBalanceMode(1)")
+	if err := loco.SetBalanceMode(1); err != nil {
 		return fmt.Errorf("set_balance_mode: %w", err)
 	}
 	if err := sleepCtx(ctx, 500*time.Millisecond); err != nil {
 		return err
 	}
 
-	g.logger.Info("readyToMove: Run")
-	if err := g.loco.SetFsmID(FsmRun); err != nil {
+	logger.Info("readyToMove: Run")
+	if err := loco.SetFsmID(FsmRun); err != nil {
 		return fmt.Errorf("run: %w", err)
 	}
 	if err := sleepCtx(ctx, 1*time.Second); err != nil {
 		return err
 	}
 
-	g.logger.Info("readyToMove: complete")
+	logger.Info("readyToMove: complete")
 	return nil
 }
 
