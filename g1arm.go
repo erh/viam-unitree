@@ -25,7 +25,7 @@ var (
 	g1BodyModel     = resource.NewModel("erh", "viam-unitree", "g1-body")
 )
 
-// G1ArmConfig configures a g1-(left|right)-arm or g1-body.
+// G1ArmConfig configures a g1-(left|right)-arm.
 //
 // model_path is optional. If supplied, it is read from disk and replaces the
 // kinematics built from the embedded G1 URDF. Joint names must be G1 joint
@@ -53,6 +53,17 @@ func (c *G1ArmConfig) Validate(path string) ([]string, []string, error) {
 	return nil, nil, nil
 }
 
+// G1BodyConfig configures a g1-body. It has G1ArmConfig's fields, but the body is read-only, so
+// it takes no gains.
+type G1BodyConfig G1ArmConfig
+
+func (c *G1BodyConfig) Validate(path string) ([]string, []string, error) {
+	if c.Kp != nil || c.Kd != nil {
+		return nil, nil, errors.New("g1-body is read-only; kp and kd apply only to the arms")
+	}
+	return nil, nil, nil
+}
+
 func init() {
 	resource.RegisterComponent(arm.API, g1LeftArmModel, resource.Registration[arm.Arm, *G1ArmConfig]{
 		Constructor: func(ctx context.Context, deps resource.Dependencies, conf resource.Config, logger logging.Logger) (arm.Arm, error) {
@@ -64,7 +75,7 @@ func init() {
 			return newG1Arm(ctx, conf, logger, sideRight)
 		},
 	})
-	resource.RegisterComponent(arm.API, g1BodyModel, resource.Registration[arm.Arm, *G1ArmConfig]{
+	resource.RegisterComponent(arm.API, g1BodyModel, resource.Registration[arm.Arm, *G1BodyConfig]{
 		Constructor: func(ctx context.Context, deps resource.Dependencies, conf resource.Config, logger logging.Logger) (arm.Arm, error) {
 			return newG1Arm(ctx, conf, logger, sideBody)
 		},
@@ -156,7 +167,15 @@ type g1Arm struct {
 }
 
 func newG1Arm(ctx context.Context, conf resource.Config, logger logging.Logger, side armSide) (arm.Arm, error) {
-	cfg, err := resource.NativeConfig[*G1ArmConfig](conf)
+	var cfg *G1ArmConfig
+	var err error
+	if side == sideBody {
+		var bc *G1BodyConfig
+		bc, err = resource.NativeConfig[*G1BodyConfig](conf)
+		cfg = (*G1ArmConfig)(bc)
+	} else {
+		cfg, err = resource.NativeConfig[*G1ArmConfig](conf)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -267,9 +286,6 @@ func (a *g1Arm) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra
 }
 
 func (a *g1Arm) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
-	if err := arm.CheckDesiredJointPositions(ctx, a, positions); err != nil {
-		return err
-	}
 	return a.commandPositions(ctx, positions)
 }
 
@@ -294,14 +310,21 @@ func (a *g1Arm) MoveThroughJointPositions(
 	return nil
 }
 
-// commandPositions writes new setpoints into the shared LowCmd snapshot. The
-// publisher loop on armSDK handles the actual DDS write at its own cadence.
+// commandPositions checks and writes new setpoints into the shared LowCmd
+// snapshot. The publisher loop on armSDK handles the actual DDS write at its
+// own cadence. It is the only path to motor commands, so the body is refused
+// here, before anything else runs.
 func (a *g1Arm) commandPositions(ctx context.Context, positions []referenceframe.Input) error {
 	if a.side == sideBody {
 		return errors.New("g1-body is read-only; move the arms with g1-left-arm / g1-right-arm")
 	}
+	// Check the length first: CheckDesiredJointPositions indexes the limits by input and panics
+	// on extra inputs.
 	if len(positions) != len(a.indices) {
 		return fmt.Errorf("expected %d joint positions, got %d", len(a.indices), len(positions))
+	}
+	if err := arm.CheckDesiredJointPositions(ctx, a, positions); err != nil {
+		return err
 	}
 
 	q := make([]float32, len(positions))
