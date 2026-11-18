@@ -303,6 +303,31 @@ func (a *armSDK) setWeight(w float32) error {
 	return nil
 }
 
+// ensureEngaged ramps the arm_sdk weight up to 1 if the arms are currently
+// dormant, after seeding every arm joint setpoint from the latest measured
+// positions so engaging holds the current pose instead of snapping to zero.
+// It is a no-op once already engaged, so it is safe to call on every move —
+// this is what lets UI joint-jogging work without a manual "engage" first.
+func (a *armSDK) ensureEngaged() error {
+	a.mu.Lock()
+	engaged := a.weight > 0
+	a.mu.Unlock()
+	if engaged {
+		return nil
+	}
+	if !a.hasState.Load() {
+		return fmt.Errorf("cannot engage arm_sdk: no lowstate received yet")
+	}
+	// Seed both arms to their current measured positions so the handoff holds
+	// pose rather than jerking toward q=0.
+	a.mu.Lock()
+	for idx := G1JointLeftShoulderPitch; idx <= G1JointRightWristYaw; idx++ {
+		a.commanded[idx].q = a.latestState.motor_state[idx].q
+	}
+	a.mu.Unlock()
+	return a.rampWeight(1, 1*time.Second)
+}
+
 // jointPosition returns the latest measured position of the given motor
 // index, or (0, false) if no lowstate has been received yet.
 func (a *armSDK) jointPosition(idx int) (float32, bool) {
@@ -405,10 +430,14 @@ func (a *armSDK) snapshotLocked() C.unitree_hg_lowcmd_t {
 		cmd.motor_cmd[i] = a.commanded[i]
 	}
 
-	// For non-arm motors (legs 0-14, and motors 30-34): echo current
-	// position from lowstate so that when weight > 0 the firmware holds
-	// these joints at their current position rather than commanding
-	// them to q=0 with zero torque (which collapses the legs).
+	// For non-arm motors (legs 0-14, and motors 30-34): echo current position
+	// from lowstate so that when weight > 0 the firmware holds these joints at
+	// their current position rather than commanding them to q=0 with zero
+	// torque. This is REQUIRED on this firmware: leaving the legs uncommanded
+	// (mode=0) does NOT keep them under the locomotion controller — the body
+	// drops to zero torque and the torso collapses. (An earlier attempt to
+	// command only the arms, per the official arm_sdk example, caused exactly
+	// that on-hardware, so we keep echoing the legs here.)
 	if a.hasState.Load() {
 		for i := 0; i < G1JointLeftShoulderPitch; i++ {
 			cmd.motor_cmd[i].q = a.latestState.motor_state[i].q

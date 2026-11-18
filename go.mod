@@ -6,6 +6,8 @@ require (
 	github.com/golang/geo v0.0.0-20230421003525-6adc56603217
 	github.com/kellydunn/golang-geo v0.7.0
 	github.com/pkg/errors v0.9.1
+	go.uber.org/multierr v1.11.0
+	go.viam.com/api v0.1.606
 	go.viam.com/rdk v1.17.0
 )
 
@@ -52,6 +54,7 @@ require (
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/bgentry/go-netrc v0.0.0-20140422174119-9fd32a8b3d3d // indirect
+	github.com/blackjack/webcam v0.6.2 // indirect
 	github.com/bluenviron/gortsplib/v4 v4.8.0 // indirect
 	github.com/bufbuild/protocompile v0.14.2-0.20260605203730-cd7c3c124e10 // indirect
 	github.com/bytedance/sonic v1.15.0 // indirect
@@ -192,9 +195,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.47.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.11.0 // indirect
 	go.uber.org/goleak v1.3.0 // indirect
-	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
-	go.viam.com/api v0.1.606 // indirect
 	go.viam.com/test v1.2.4 // indirect
 	go.viam.com/utils v0.17.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect

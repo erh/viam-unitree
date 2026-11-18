@@ -123,6 +123,31 @@ typedef struct {
 extern const dds_topic_descriptor_t unitree_hg_lowcmd_desc;
 extern const dds_topic_descriptor_t unitree_hg_lowstate_desc;
 
+/* unitree_hg::msg::dds_::BmsState_ — battery management state. Published on
+ * the G1 at "rt/lf/bmsstate" (the hg LowState has no battery field). Fields
+ * and order match unitree_sdk2 include/unitree/idl/hg/BmsState_.hpp.
+ *   soc  = state of charge, integer percent 0..100
+ *   soh  = state of health, integer percent 0..100
+ *   current  = pack current, signed (negative = discharging)
+ *   bmsvoltage / cell_vol = pack / per-cell voltages (integer, see driver) */
+typedef struct {
+    uint8_t  version_high;
+    uint8_t  version_low;
+    uint8_t  fn;
+    uint16_t cell_vol[40];
+    uint32_t bmsvoltage[3];
+    int32_t  current;
+    uint8_t  soc;
+    uint8_t  soh;
+    int16_t  temperature[12];
+    uint16_t cycle;
+    uint16_t manufacturer_date;
+    uint32_t bmsstate[5];
+    uint32_t reserve[3];
+} unitree_hg_bms_state_t;
+
+extern const dds_topic_descriptor_t unitree_hg_bmsstate_desc;
+
 /* ROS2 sensor_msgs::msg::dds_::PointCloud2_ - flattened to match CDR layout. */
 typedef struct {
     char    *name;
@@ -238,6 +263,7 @@ void unitree_response_free(unitree_response_t *resp);
      0 = PointCloud2
      1 = unitree_hg LowState (G1 low-level state)
      2 = unitree_go SportModeState (G1 odometer)
+     3 = unitree_hg BmsState (G1 battery, "rt/lf/bmsstate")
    Returns 0 on success and writes the reader handle to *reader_out. */
 int unitree_dds_subscribe(const char *topic_name, int topic_type,
                           dds_entity_t *reader_out);
@@ -261,6 +287,11 @@ int unitree_dds_take_lowstate(dds_entity_t reader, int timeout_ms,
    Returns 0 on success; the caller can read out directly (no allocations). */
 int unitree_dds_take_sport_mode_state(dds_entity_t reader, int timeout_ms,
                                        unitree_go_sport_mode_state_t *out);
+
+/* Take the latest BmsState_ from a reader created with topic_type=3.
+   Returns 0 on success; the caller can read out directly (no allocations). */
+int unitree_dds_take_bmsstate(dds_entity_t reader, int timeout_ms,
+                              unitree_hg_bms_state_t *out);
 
 /* Enumerate every remote publication (writer) the participant has discovered.
    Writes newline-separated "topic_name|type_name" entries into buf (NUL

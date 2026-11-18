@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
-	commonpb "go.viam.com/api/common/v1"
 
+	commonpb "go.viam.com/api/common/v1"
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/grpc"
 	"go.viam.com/rdk/logging"
@@ -315,6 +315,13 @@ func (a *g1Arm) commandPositions(ctx context.Context, positions []referenceframe
 	a.mu.Unlock()
 
 	a.moving.Store(true)
+	// Auto-engage: take arm_sdk ownership (weight→1) on the first move so
+	// jogging from the UI works without a manual "engage" DoCommand. No-op
+	// once already engaged.
+	if err := a.sdk.ensureEngaged(); err != nil {
+		a.moving.Store(false)
+		return err
+	}
 	if err := a.sdk.setArmCommand(a.indices, q, a.kp, a.kd); err != nil {
 		a.moving.Store(false)
 		return err
@@ -331,31 +338,6 @@ func (a *g1Arm) commandPositions(ctx context.Context, positions []referenceframe
 		a.moving.Store(false)
 	}()
 	return nil
-}
-
-func (a *g1Arm) MoveThroughJointPositionsStreamed(
-	ctx context.Context,
-	_ <-chan []arm.TrajectoryPoint,
-	_ chan<- arm.Response,
-	_ map[string]interface{},
-) error {
-	return grpc.UnimplementedError
-}
-
-func (a *g1Arm) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
-	return map[string]*commonpb.Mesh{}, nil
-}
-
-func (a *g1Arm) Properties(ctx context.Context, extra map[string]interface{}) (arm.Properties, error) {
-	return arm.Properties{}, nil
-}
-
-func (a *g1Arm) SetManualMode(ctx context.Context, manualMode bool, enabledFor time.Duration, extra map[string]interface{}) error {
-	return grpc.UnimplementedError
-}
-
-func (a *g1Arm) ManualMode(ctx context.Context, extra map[string]interface{}) (bool, error) {
-	return false, grpc.UnimplementedError
 }
 
 func (a *g1Arm) Stop(ctx context.Context, extra map[string]interface{}) error {
@@ -388,6 +370,55 @@ func (a *g1Arm) Geometries(ctx context.Context, extra map[string]interface{}) ([
 		return nil, err
 	}
 	return gif.Geometries(), nil
+}
+
+// MoveThroughJointPositionsStreamed executes a streamed trajectory by applying
+// each waypoint in order. We have no time model, so per-point Time/Constraints
+// are ignored; we command each waypoint and acknowledge once per batch.
+func (a *g1Arm) MoveThroughJointPositionsStreamed(
+	ctx context.Context,
+	batches <-chan []arm.TrajectoryPoint,
+	responses chan<- arm.Response,
+	_ map[string]interface{},
+) error {
+	for batch := range batches {
+		for _, p := range batch {
+			if err := a.MoveToJointPositions(ctx, p.Positions, nil); err != nil {
+				return err
+			}
+		}
+		select {
+		case responses <- arm.Response{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// Get3DModels returns the visual meshes the arm's kinematic model carries,
+// keyed by link. The embedded G1 arm models ship none, so this is empty.
+func (a *g1Arm) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
+	models := referenceframe.VisualMeshes(a.model)
+	if models == nil {
+		models = map[string]*commonpb.Mesh{}
+	}
+	return models, nil
+}
+
+func (a *g1Arm) Properties(ctx context.Context, extra map[string]interface{}) (arm.Properties, error) {
+	return arm.Properties{
+		SupportManualMode:        false,
+		SupportCartesianCommands: false,
+	}, nil
+}
+
+func (a *g1Arm) SetManualMode(ctx context.Context, manualMode bool, enabledFor time.Duration, extra map[string]interface{}) error {
+	return grpc.UnimplementedError
+}
+
+func (a *g1Arm) ManualMode(ctx context.Context, extra map[string]interface{}) (bool, error) {
+	return false, grpc.UnimplementedError
 }
 
 func (a *g1Arm) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {

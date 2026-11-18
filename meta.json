@@ -20,12 +20,22 @@
     {
       "api": "rdk:component:camera",
       "model": "erh:viam-unitree:g1-lidar",
-      "description": "Lidar component for Unitree G1 (exposes point clouds via the camera API)"
+      "description": "Lidar component for Unitree G1 Mid-360 (Livox-SDK2 by default; optional Unitree DDS topic)"
     },
     {
       "api": "rdk:component:generic",
       "model": "erh:viam-unitree:g1",
       "description": "Generic component for Unitree G1 with high-level control commands"
+    },
+    {
+      "api": "rdk:component:switch",
+      "model": "erh:viam-unitree:g1-mode",
+      "description": "Switch to select the Unitree G1 robot mode (zero_torque/damp/sit/stand/walk)"
+    },
+    {
+      "api": "rdk:component:power_sensor",
+      "model": "erh:viam-unitree:g1-battery",
+      "description": "Unitree G1 battery (BMS) state: voltage, current, power, and SOC via readings"
     },
     {
       "api": "rdk:component:arm",
@@ -48,7 +58,7 @@
       "description": "Movement sensor from the Unitree G1 odometer (position, velocity, orientation)"
     }
   ],
-  "entrypoint": "viam-unitree",
+  "entrypoint": "bin/viam-unitree",
   "first_run": "",
   "build": {
     "build": "make module",
