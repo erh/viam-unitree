@@ -1,14 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
-	"image/png"
 	"math"
 	"strings"
 	"time"
@@ -16,11 +14,11 @@ import (
 	"github.com/golang/geo/r3"
 
 	"go.viam.com/rdk/components/camera"
-	"go.viam.com/rdk/gostream"
+	"go.viam.com/rdk/data"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/resource"
-	"go.viam.com/rdk/rimage/transform"
+	"go.viam.com/rdk/spatialmath"
 	rdkutils "go.viam.com/rdk/utils"
 )
 
@@ -75,8 +73,8 @@ type G1LidarConfig struct {
 	ZMaxMeters float64 `json:"z_max_meters"`
 }
 
-func (c *G1LidarConfig) Validate(path string) ([]string, error) {
-	return nil, nil
+func (c *G1LidarConfig) Validate(path string) ([]string, []string, error) {
+	return nil, nil, nil
 }
 
 func init() {
@@ -218,7 +216,7 @@ func newG1Lidar(ctx context.Context, deps resource.Dependencies, conf resource.C
 }
 
 // NextPointCloud is the primary API for lidar.
-func (l *g1Lidar) NextPointCloud(ctx context.Context) (pointcloud.PointCloud, error) {
+func (l *g1Lidar) NextPointCloud(ctx context.Context, _ map[string]interface{}) (pointcloud.PointCloud, error) {
 	pc2, err := l.lidar.Read(2000)
 	if err != nil {
 		return nil, err
@@ -232,7 +230,7 @@ func (l *g1Lidar) NextPointCloud(ctx context.Context) (pointcloud.PointCloud, er
 // Point height (Z) is encoded in a blue->green->yellow->red colormap when the
 // lidar returns z values, to give a sense of obstacle height.
 func (l *g1Lidar) render2D(ctx context.Context) (image.Image, error) {
-	pc, err := l.NextPointCloud(ctx)
+	pc, err := l.NextPointCloud(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +356,7 @@ func drawCircle(img *image.RGBA, cx, cy, r int, c color.Color) {
 // rather than assuming a fixed layout.
 func convertPointCloud2(pc *PointCloud2) (pointcloud.PointCloud, error) {
 	if len(pc.Data) == 0 || pc.PointStep == 0 {
-		return pointcloud.New(), nil
+		return pointcloud.NewBasicEmpty(), nil
 	}
 
 	var xField, yField, zField, intensityField *PointField
@@ -380,7 +378,7 @@ func convertPointCloud2(pc *PointCloud2) (pointcloud.PointCloud, error) {
 	}
 
 	numPoints := uint32(len(pc.Data)) / pc.PointStep
-	out := pointcloud.NewWithPrealloc(int(numPoints))
+	out := pointcloud.NewBasicPointCloud(int(numPoints))
 
 	var bo binary.ByteOrder = binary.LittleEndian
 	if pc.IsBigendian {
@@ -457,38 +455,20 @@ func readFloat(buf []byte, off uint32, datatype uint8, bo binary.ByteOrder) (flo
 
 // --- Camera interface methods: 2D methods render a top-down view of the point cloud. ---
 
-func (l *g1Lidar) Image(ctx context.Context, mimeType string, extra map[string]interface{}) ([]byte, camera.ImageMetadata, error) {
-	img, err := l.render2D(ctx)
-	if err != nil {
-		return nil, camera.ImageMetadata{}, err
-	}
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		return nil, camera.ImageMetadata{}, fmt.Errorf("encode png: %w", err)
-	}
-	return buf.Bytes(), camera.ImageMetadata{MimeType: rdkutils.MimeTypePNG}, nil
-}
-
-func (l *g1Lidar) Images(ctx context.Context) ([]camera.NamedImage, resource.ResponseMetadata, error) {
+func (l *g1Lidar) Images(ctx context.Context, _ []string, _ map[string]interface{}) ([]camera.NamedImage, resource.ResponseMetadata, error) {
 	img, err := l.render2D(ctx)
 	if err != nil {
 		return nil, resource.ResponseMetadata{}, err
 	}
-	return []camera.NamedImage{
-			{Image: img, SourceName: l.Name().ShortName()},
-		}, resource.ResponseMetadata{
-			CapturedAt: time.Now(),
-		}, nil
+	named, err := camera.NamedImageFromImage(img, l.Name().ShortName(), rdkutils.MimeTypePNG, data.Annotations{})
+	if err != nil {
+		return nil, resource.ResponseMetadata{}, err
+	}
+	return []camera.NamedImage{named}, resource.ResponseMetadata{CapturedAt: time.Now()}, nil
 }
 
-func (l *g1Lidar) Stream(ctx context.Context, errHandlers ...gostream.ErrorHandler) (gostream.VideoStream, error) {
-	return gostream.NewEmbeddedVideoStreamFromReader(gostream.VideoReaderFunc(func(ctx context.Context) (image.Image, func(), error) {
-		img, err := l.render2D(ctx)
-		if err != nil {
-			return nil, nil, err
-		}
-		return img, func() {}, nil
-	})), nil
+func (l *g1Lidar) Geometries(ctx context.Context, _ map[string]interface{}) ([]spatialmath.Geometry, error) {
+	return nil, nil
 }
 
 func (l *g1Lidar) Properties(ctx context.Context) (camera.Properties, error) {
@@ -497,10 +477,6 @@ func (l *g1Lidar) Properties(ctx context.Context) (camera.Properties, error) {
 		MimeTypes:   []string{rdkutils.MimeTypePNG},
 		ImageType:   camera.ColorStream,
 	}, nil
-}
-
-func (l *g1Lidar) Projector(ctx context.Context) (transform.Projector, error) {
-	return nil, transform.NewNoIntrinsicsError("")
 }
 
 // DoCommand supports manual control of the lidar switch:

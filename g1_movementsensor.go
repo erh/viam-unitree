@@ -27,8 +27,8 @@ type G1MovementSensorConfig struct {
 	Topic string `json:"topic"`
 }
 
-func (c *G1MovementSensorConfig) Validate(path string) ([]string, error) {
-	return nil, nil
+func (c *G1MovementSensorConfig) Validate(path string) ([]string, []string, error) {
+	return nil, nil, nil
 }
 
 func init() {

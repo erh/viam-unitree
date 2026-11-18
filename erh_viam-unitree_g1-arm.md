@@ -23,13 +23,15 @@ held at 1.0 so `arm_sdk` fully overrides sport-mode arm motion. The DoCommand
 | Name                | Type      | Inclusion | Description                                                                          |
 |---------------------|-----------|-----------|--------------------------------------------------------------------------------------|
 | `network_interface` | string    | Optional  | Network interface for DDS communication (default: `eth0`).                           |
-| `model_path`        | string    | Optional  | Override the embedded kinematic model. `.urdf` and `.json` are accepted.             |
+| `model_path`        | string    | Optional  | Override the embedded kinematics (`.urdf` or `.json`). Joint names must be G1 joint names (e.g. `left_elbow_joint`). |
 | `kp`                | float[7]  | Optional  | Per-joint position gains. Defaults: `[60, 60, 60, 60, 30, 30, 30]`.                  |
 | `kd`                | float[7]  | Optional  | Per-joint velocity gains. Defaults: `[1.5, 1.5, 1.5, 1.5, 1.0, 1.0, 1.0]`.           |
 
-The embedded kinematic models are best-effort approximations from publicly
-documented G1 specifications (link lengths, joint axes, joint limits). If you
-have the exact URDF for your G1 variant, point `model_path` at it.
+Kinematics come from the G1 29-DoF URDF ([isri-aist/g1_description](https://github.com/isri-aist/g1_description)),
+embedded in the module. Each arm's model starts at `torso_link` and ends at the
+palm (`left_rubber_hand` / `right_rubber_hand`), so to place the arms on the
+robot, set their frame parent to a [`g1-body`](erh_viam-unitree_g1-body.md)
+component with no offset.
 
 ### Joint order
 
@@ -59,8 +61,7 @@ Both arms expose 7 DoF in shoulder-to-wrist order:
   derived from the public Unitree SDK2 documentation. They have been written
   to match the on-the-wire format used by the G1 `rt/arm_sdk` topic, but
   hardware verification is recommended for any deployment.
-- The kinematic models are approximations. Tune `model_path`, `kp`, `kd` for
-  the specific G1 variant in use.
+- Tune `kp` / `kd` for the specific G1 variant in use.
 - For pre-recorded arm gestures (wave, hug, hands-up, etc.) use the generic
   `erh:viam-unitree:g1` component's DoCommand interface — those run on the
   G1's built-in arm-action library and don't need arm_sdk.

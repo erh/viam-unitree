@@ -3,16 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
-	"image"
 	"time"
 
 	"go.viam.com/rdk/components/camera"
-	"go.viam.com/rdk/gostream"
+	"go.viam.com/rdk/data"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/resource"
-	"go.viam.com/rdk/rimage"
-	"go.viam.com/rdk/rimage/transform"
+	"go.viam.com/rdk/spatialmath"
 	rdkutils "go.viam.com/rdk/utils"
 )
 
@@ -22,8 +20,8 @@ type G1CameraConfig struct {
 	NetworkInterface string `json:"network_interface"`
 }
 
-func (c *G1CameraConfig) Validate(path string) ([]string, error) {
-	return nil, nil
+func (c *G1CameraConfig) Validate(path string) ([]string, []string, error) {
+	return nil, nil, nil
 }
 
 func init() {
@@ -71,48 +69,24 @@ func newG1Camera(ctx context.Context, deps resource.Dependencies, conf resource.
 	}, nil
 }
 
-func (c *g1Camera) Image(ctx context.Context, mimeType string, extra map[string]interface{}) ([]byte, camera.ImageMetadata, error) {
-	jpegData, err := c.video.GetImage()
-	if err != nil {
-		return nil, camera.ImageMetadata{}, err
-	}
-	return jpegData, camera.ImageMetadata{MimeType: rdkutils.MimeTypeJPEG}, nil
-}
-
-func (c *g1Camera) Images(ctx context.Context) ([]camera.NamedImage, resource.ResponseMetadata, error) {
+func (c *g1Camera) Images(ctx context.Context, _ []string, _ map[string]interface{}) ([]camera.NamedImage, resource.ResponseMetadata, error) {
 	jpegData, err := c.video.GetImage()
 	if err != nil {
 		return nil, resource.ResponseMetadata{}, err
 	}
-
-	img, err := rimage.DecodeImage(ctx, jpegData, rdkutils.MimeTypeJPEG)
+	img, err := camera.NamedImageFromBytes(jpegData, c.Name().ShortName(), rdkutils.MimeTypeJPEG, data.Annotations{})
 	if err != nil {
-		return nil, resource.ResponseMetadata{}, fmt.Errorf("decode jpeg: %w", err)
+		return nil, resource.ResponseMetadata{}, err
 	}
-
-	return []camera.NamedImage{
-			{Image: img, SourceName: c.Name().ShortName()},
-		}, resource.ResponseMetadata{
-			CapturedAt: time.Now(),
-		}, nil
+	return []camera.NamedImage{img}, resource.ResponseMetadata{CapturedAt: time.Now()}, nil
 }
 
-func (c *g1Camera) Stream(ctx context.Context, errHandlers ...gostream.ErrorHandler) (gostream.VideoStream, error) {
-	return gostream.NewEmbeddedVideoStreamFromReader(gostream.VideoReaderFunc(func(ctx context.Context) (image.Image, func(), error) {
-		jpegData, err := c.video.GetImage()
-		if err != nil {
-			return nil, nil, err
-		}
-		img, err := rimage.DecodeImage(ctx, jpegData, rdkutils.MimeTypeJPEG)
-		if err != nil {
-			return nil, nil, fmt.Errorf("decode jpeg: %w", err)
-		}
-		return img, func() {}, nil
-	})), nil
-}
-
-func (c *g1Camera) NextPointCloud(ctx context.Context) (pointcloud.PointCloud, error) {
+func (c *g1Camera) NextPointCloud(ctx context.Context, _ map[string]interface{}) (pointcloud.PointCloud, error) {
 	return nil, fmt.Errorf("point cloud not supported")
+}
+
+func (c *g1Camera) Geometries(ctx context.Context, _ map[string]interface{}) ([]spatialmath.Geometry, error) {
+	return nil, nil
 }
 
 func (c *g1Camera) Properties(ctx context.Context) (camera.Properties, error) {
@@ -122,10 +96,6 @@ func (c *g1Camera) Properties(ctx context.Context) (camera.Properties, error) {
 		FrameRate:   30.0,
 		ImageType:   camera.ColorStream,
 	}, nil
-}
-
-func (c *g1Camera) Projector(ctx context.Context) (transform.Projector, error) {
-	return nil, transform.NewNoIntrinsicsError("")
 }
 
 func (c *g1Camera) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {

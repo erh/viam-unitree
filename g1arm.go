@@ -2,18 +2,18 @@ package main
 
 import (
 	"context"
-	_ "embed"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/pkg/errors"
+	commonpb "go.viam.com/api/common/v1"
 
 	"go.viam.com/rdk/components/arm"
+	"go.viam.com/rdk/grpc"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
-	"go.viam.com/rdk/referenceframe/urdf"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/spatialmath"
 )
@@ -21,19 +21,14 @@ import (
 var (
 	g1LeftArmModel  = resource.NewModel("erh", "viam-unitree", "g1-left-arm")
 	g1RightArmModel = resource.NewModel("erh", "viam-unitree", "g1-right-arm")
+	g1BodyModel     = resource.NewModel("erh", "viam-unitree", "g1-body")
 )
 
-//go:embed g1_left_arm_model.json
-var g1LeftArmKinematics []byte
-
-//go:embed g1_right_arm_model.json
-var g1RightArmKinematics []byte
-
-// G1ArmConfig configures a g1-(left|right)-arm.
+// G1ArmConfig configures a g1-(left|right)-arm or g1-body.
 //
 // model_path is optional. If supplied, it is read from disk and replaces the
-// embedded best-effort kinematic model. Use this if your G1 has different
-// link lengths than the defaults baked into this module.
+// kinematics built from the embedded G1 URDF. Joint names must be G1 joint
+// names (e.g. left_elbow or left_elbow_joint) so they map to motors.
 type G1ArmConfig struct {
 	NetworkInterface string `json:"network_interface"`
 
@@ -47,14 +42,14 @@ type G1ArmConfig struct {
 	Kd []float64 `json:"kd,omitempty"`
 }
 
-func (c *G1ArmConfig) Validate(path string) ([]string, error) {
+func (c *G1ArmConfig) Validate(path string) ([]string, []string, error) {
 	if c.Kp != nil && len(c.Kp) != G1ArmDoF {
-		return nil, errors.Errorf("kp must have %d entries, got %d", G1ArmDoF, len(c.Kp))
+		return nil, nil, errors.Errorf("kp must have %d entries, got %d", G1ArmDoF, len(c.Kp))
 	}
 	if c.Kd != nil && len(c.Kd) != G1ArmDoF {
-		return nil, errors.Errorf("kd must have %d entries, got %d", G1ArmDoF, len(c.Kd))
+		return nil, nil, errors.Errorf("kd must have %d entries, got %d", G1ArmDoF, len(c.Kd))
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 func init() {
@@ -68,6 +63,11 @@ func init() {
 			return newG1Arm(ctx, conf, logger, sideRight)
 		},
 	})
+	resource.RegisterComponent(arm.API, g1BodyModel, resource.Registration[arm.Arm, *G1ArmConfig]{
+		Constructor: func(ctx context.Context, deps resource.Dependencies, conf resource.Config, logger logging.Logger) (arm.Arm, error) {
+			return newG1Arm(ctx, conf, logger, sideBody)
+		},
+	})
 }
 
 type armSide int
@@ -75,6 +75,8 @@ type armSide int
 const (
 	sideLeft armSide = iota
 	sideRight
+	// sideBody is pelvis, legs and waist: read-only, since arm_sdk can't drive the legs.
+	sideBody
 )
 
 // Default position/velocity gains. The G1 arm motors are relatively low
@@ -130,34 +132,28 @@ func newG1Arm(ctx context.Context, conf resource.Config, logger logging.Logger, 
 		return nil, fmt.Errorf("arm_sdk client: %w", err)
 	}
 
-	var (
-		model    referenceframe.Model
-		indices  []int
-		modelRaw []byte
-	)
-	switch side {
-	case sideLeft:
-		modelRaw = g1LeftArmKinematics
-		indices = LeftArmJointIndices
-	case sideRight:
-		modelRaw = g1RightArmKinematics
-		indices = RightArmJointIndices
+	var model referenceframe.Model
+	switch {
+	case cfg.ModelPath != "":
+		model, err = referenceframe.KinematicModelFromFile(cfg.ModelPath, conf.Name)
+	case side == sideLeft:
+		model, err = g1LeftArmKinematics(conf.Name)
+	case side == sideRight:
+		model, err = g1RightArmKinematics(conf.Name)
+	default:
+		model, err = g1BodyKinematics(conf.Name)
 	}
-
-	if cfg.ModelPath != "" {
-		model, err = loadArmModel(cfg.ModelPath, conf.Name)
-	} else {
-		model, err = referenceframe.UnmarshalModelJSON(modelRaw, conf.Name)
+	var indices []int
+	if err == nil {
+		indices, err = g1JointIndices(model)
+	}
+	if err == nil && side != sideBody && len(indices) != G1ArmDoF {
+		err = fmt.Errorf("arm model must have %d DoF, got %d", G1ArmDoF, len(indices))
 	}
 	if err != nil {
 		sdk.release()
 		ShutdownDDS()
 		return nil, fmt.Errorf("load arm model: %w", err)
-	}
-	if got := len(model.DoF()); got != G1ArmDoF {
-		sdk.release()
-		ShutdownDDS()
-		return nil, fmt.Errorf("arm model must have %d DoF, got %d", G1ArmDoF, got)
 	}
 
 	kp := append([]float32(nil), defaultArmKp...)
@@ -178,7 +174,7 @@ func newG1Arm(ctx context.Context, conf resource.Config, logger logging.Logger, 
 		model:     model,
 		kp:        kp,
 		kd:        kd,
-		commanded: make([]float64, G1ArmDoF),
+		commanded: make([]float64, len(indices)),
 	}
 
 	// Arms start dormant (weight=0, no DDS writer registered). This
@@ -191,21 +187,18 @@ func newG1Arm(ctx context.Context, conf resource.Config, logger logging.Logger, 
 }
 
 func (a *g1Arm) sideName() string {
-	if a.side == sideLeft {
+	switch a.side {
+	case sideLeft:
 		return "left"
+	case sideRight:
+		return "right"
+	default:
+		return "body"
 	}
-	return "right"
 }
 
-func loadArmModel(path, name string) (referenceframe.Model, error) {
-	if len(path) > 5 && path[len(path)-5:] == ".urdf" {
-		return urdf.ParseModelXMLFile(path, name)
-	}
-	return referenceframe.ParseModelJSONFile(path, name)
-}
-
-func (a *g1Arm) ModelFrame() referenceframe.Model {
-	return a.model
+func (a *g1Arm) Kinematics(ctx context.Context) (referenceframe.Model, error) {
+	return a.model, nil
 }
 
 func (a *g1Arm) JointPositions(ctx context.Context, extra map[string]interface{}) ([]referenceframe.Input, error) {
@@ -214,18 +207,18 @@ func (a *g1Arm) JointPositions(ctx context.Context, extra map[string]interface{}
 	if pos, ok := a.sdk.jointPositions(a.indices); ok {
 		out := make([]referenceframe.Input, len(pos))
 		for i, p := range pos {
-			out[i] = referenceframe.Input{Value: float64(p)}
+			out[i] = float64(p)
 		}
 		return out, nil
+	}
+	if a.side == sideBody {
+		// The body is never commanded, so there is no setpoint to fall back to.
+		return nil, errors.New("no rt/lowstate received yet")
 	}
 
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	out := make([]referenceframe.Input, len(a.commanded))
-	for i, p := range a.commanded {
-		out[i] = referenceframe.Input{Value: p}
-	}
-	return out, nil
+	return append([]referenceframe.Input(nil), a.commanded...), nil
 }
 
 func (a *g1Arm) EndPosition(ctx context.Context, extra map[string]interface{}) (spatialmath.Pose, error) {
@@ -233,7 +226,7 @@ func (a *g1Arm) EndPosition(ctx context.Context, extra map[string]interface{}) (
 	if err != nil {
 		return nil, err
 	}
-	return referenceframe.ComputeOOBPosition(a.model, joints)
+	return a.model.Transform(joints)
 }
 
 func (a *g1Arm) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
@@ -271,19 +264,20 @@ func (a *g1Arm) MoveThroughJointPositions(
 // commandPositions writes new setpoints into the shared LowCmd snapshot. The
 // publisher loop on armSDK handles the actual DDS write at its own cadence.
 func (a *g1Arm) commandPositions(ctx context.Context, positions []referenceframe.Input) error {
+	if a.side == sideBody {
+		return errors.New("g1-body is read-only; move the arms with g1-left-arm / g1-right-arm")
+	}
 	if len(positions) != len(a.indices) {
 		return fmt.Errorf("expected %d joint positions, got %d", len(a.indices), len(positions))
 	}
 
 	q := make([]float32, len(positions))
 	for i, p := range positions {
-		q[i] = float32(p.Value)
+		q[i] = float32(p)
 	}
 
 	a.mu.Lock()
-	for i, p := range positions {
-		a.commanded[i] = p.Value
-	}
+	copy(a.commanded, positions)
 	a.lastCmdTime = time.Now()
 	a.mu.Unlock()
 
@@ -304,6 +298,31 @@ func (a *g1Arm) commandPositions(ctx context.Context, positions []referenceframe
 		a.moving.Store(false)
 	}()
 	return nil
+}
+
+func (a *g1Arm) MoveThroughJointPositionsStreamed(
+	ctx context.Context,
+	_ <-chan []arm.TrajectoryPoint,
+	_ chan<- arm.Response,
+	_ map[string]interface{},
+) error {
+	return grpc.UnimplementedError
+}
+
+func (a *g1Arm) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
+	return map[string]*commonpb.Mesh{}, nil
+}
+
+func (a *g1Arm) Properties(ctx context.Context, extra map[string]interface{}) (arm.Properties, error) {
+	return arm.Properties{}, nil
+}
+
+func (a *g1Arm) SetManualMode(ctx context.Context, manualMode bool, enabledFor time.Duration, extra map[string]interface{}) error {
+	return grpc.UnimplementedError
+}
+
+func (a *g1Arm) ManualMode(ctx context.Context, extra map[string]interface{}) (bool, error) {
+	return false, grpc.UnimplementedError
 }
 
 func (a *g1Arm) Stop(ctx context.Context, extra map[string]interface{}) error {
@@ -340,6 +359,10 @@ func (a *g1Arm) Geometries(ctx context.Context, extra map[string]interface{}) ([
 
 func (a *g1Arm) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	cmdStr, _ := cmd["command"].(string)
+	if a.side == sideBody && cmdStr != "" {
+		// arm_sdk weight is shared with the arms; don't let the read-only body take them over.
+		return map[string]interface{}{"error": "g1-body has no commands; use an arm component"}, nil
+	}
 	switch cmdStr {
 	case "release":
 		// Gradually ramp weight down to surrender control back to sport.

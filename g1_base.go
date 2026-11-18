@@ -22,8 +22,8 @@ type G1BaseConfig struct {
 	NetworkInterface string `json:"network_interface"`
 }
 
-func (c *G1BaseConfig) Validate(path string) ([]string, error) {
-	return nil, nil
+func (c *G1BaseConfig) Validate(path string) ([]string, []string, error) {
+	return nil, nil, nil
 }
 
 func init() {

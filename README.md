@@ -10,4 +10,5 @@ Viam module for the Unitree G1 humanoid robot.
 - `erh:viam-unitree:g1` - Generic component with high-level commands (incl. pre-built arm gestures)
 - [`erh:viam-unitree:g1-left-arm`](erh_viam-unitree_g1-arm.md) - Left arm joint control via arm_sdk
 - [`erh:viam-unitree:g1-right-arm`](erh_viam-unitree_g1-arm.md) - Right arm joint control via arm_sdk
+- [`erh:viam-unitree:g1-body`](erh_viam-unitree_g1-body.md) - Read-only pelvis/legs/waist kinematics; parent of the arms in the frame system
 - [`erh:viam-unitree:g1-movementsensor`](erh_viam-unitree_g1-movementsensor.md) - Odometer movement sensor (pose, velocity, orientation)
