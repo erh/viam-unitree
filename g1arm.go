@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	_ "embed"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,19 +22,14 @@ import (
 var (
 	g1LeftArmModel  = resource.NewModel("erh", "viam-unitree", "g1-left-arm")
 	g1RightArmModel = resource.NewModel("erh", "viam-unitree", "g1-right-arm")
+	g1BodyModel     = resource.NewModel("erh", "viam-unitree", "g1-body")
 )
-
-//go:embed g1_left_arm_model.json
-var g1LeftArmKinematics []byte
-
-//go:embed g1_right_arm_model.json
-var g1RightArmKinematics []byte
 
 // G1ArmConfig configures a g1-(left|right)-arm.
 //
 // model_path is optional. If supplied, it is read from disk and replaces the
-// embedded best-effort kinematic model. Use this if your G1 has different
-// link lengths than the defaults baked into this module.
+// kinematics built from the embedded G1 URDF. Joint names must be G1 joint
+// names (e.g. left_elbow or left_elbow_joint) so they map to motors.
 type G1ArmConfig struct {
 	NetworkInterface string `json:"network_interface"`
 
@@ -58,6 +53,17 @@ func (c *G1ArmConfig) Validate(path string) ([]string, []string, error) {
 	return nil, nil, nil
 }
 
+// G1BodyConfig configures a g1-body. It has G1ArmConfig's fields, but the body is read-only, so
+// it takes no gains.
+type G1BodyConfig G1ArmConfig
+
+func (c *G1BodyConfig) Validate(path string) ([]string, []string, error) {
+	if c.Kp != nil || c.Kd != nil {
+		return nil, nil, errors.New("g1-body is read-only; kp and kd apply only to the arms")
+	}
+	return nil, nil, nil
+}
+
 func init() {
 	resource.RegisterComponent(arm.API, g1LeftArmModel, resource.Registration[arm.Arm, *G1ArmConfig]{
 		Constructor: func(ctx context.Context, deps resource.Dependencies, conf resource.Config, logger logging.Logger) (arm.Arm, error) {
@@ -69,6 +75,11 @@ func init() {
 			return newG1Arm(ctx, conf, logger, sideRight)
 		},
 	})
+	resource.RegisterComponent(arm.API, g1BodyModel, resource.Registration[arm.Arm, *G1BodyConfig]{
+		Constructor: func(ctx context.Context, deps resource.Dependencies, conf resource.Config, logger logging.Logger) (arm.Arm, error) {
+			return newG1Arm(ctx, conf, logger, sideBody)
+		},
+	})
 }
 
 type armSide int
@@ -76,7 +87,52 @@ type armSide int
 const (
 	sideLeft armSide = iota
 	sideRight
+	// sideBody is pelvis, legs and waist: read-only, since arm_sdk can't drive the legs.
+	sideBody
 )
+
+func (s armSide) String() string {
+	switch s {
+	case sideLeft:
+		return "left arm"
+	case sideRight:
+		return "right arm"
+	default:
+		return "body"
+	}
+}
+
+// motors is the rt/lowstate motor index range [lo, hi) that the side's model must cover.
+func (s armSide) motors() (lo, hi int) {
+	switch s {
+	case sideLeft:
+		return G1JointLeftShoulderPitch, G1JointLeftWristYaw + 1
+	case sideRight:
+		return G1JointRightShoulderPitch, G1JointRightWristYaw + 1
+	default:
+		return G1JointLeftHipPitch, G1JointWaistPitch + 1
+	}
+}
+
+// checkJoints reports an error unless indices, a model's motor indices from g1JointIndices, hold
+// each of the side's motors exactly once, in any order.
+func (s armSide) checkJoints(indices []int) error {
+	lo, hi := s.motors()
+	seen := make([]bool, hi-lo)
+	for _, idx := range indices {
+		if idx < lo || idx >= hi {
+			return fmt.Errorf("the %s model has joint %s, which is not a %s joint", s, g1MotorJoints[idx], s)
+		}
+		if seen[idx-lo] {
+			return fmt.Errorf("the %s model has joint %s twice", s, g1MotorJoints[idx])
+		}
+		seen[idx-lo] = true
+	}
+	if i := slices.Index(seen, false); i >= 0 {
+		return fmt.Errorf("the %s model must have %d DoF, got %d: it is missing %s", s, hi-lo, len(indices), g1MotorJoints[lo+i])
+	}
+	return nil
+}
 
 // Default position/velocity gains. The G1 arm motors are relatively low
 // gear-ratio direct drive so values in this range are a reasonable start.
@@ -111,7 +167,15 @@ type g1Arm struct {
 }
 
 func newG1Arm(ctx context.Context, conf resource.Config, logger logging.Logger, side armSide) (arm.Arm, error) {
-	cfg, err := resource.NativeConfig[*G1ArmConfig](conf)
+	var cfg *G1ArmConfig
+	var err error
+	if side == sideBody {
+		var bc *G1BodyConfig
+		bc, err = resource.NativeConfig[*G1BodyConfig](conf)
+		cfg = (*G1ArmConfig)(bc)
+	} else {
+		cfg, err = resource.NativeConfig[*G1ArmConfig](conf)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -131,34 +195,28 @@ func newG1Arm(ctx context.Context, conf resource.Config, logger logging.Logger, 
 		return nil, fmt.Errorf("arm_sdk client: %w", err)
 	}
 
-	var (
-		model    referenceframe.Model
-		indices  []int
-		modelRaw []byte
-	)
-	switch side {
-	case sideLeft:
-		modelRaw = g1LeftArmKinematics
-		indices = LeftArmJointIndices
-	case sideRight:
-		modelRaw = g1RightArmKinematics
-		indices = RightArmJointIndices
+	var model referenceframe.Model
+	switch {
+	case cfg.ModelPath != "":
+		model, err = referenceframe.KinematicModelFromFile(cfg.ModelPath, conf.Name)
+	case side == sideLeft:
+		model, err = g1LeftArmKinematics(conf.Name)
+	case side == sideRight:
+		model, err = g1RightArmKinematics(conf.Name)
+	default:
+		model, err = g1BodyKinematics(conf.Name)
 	}
-
-	if cfg.ModelPath != "" {
-		model, err = loadArmModel(cfg.ModelPath, conf.Name)
-	} else {
-		model, err = referenceframe.UnmarshalModelJSON(modelRaw, conf.Name)
+	var indices []int
+	if err == nil {
+		indices, err = g1JointIndices(model)
+	}
+	if err == nil {
+		err = side.checkJoints(indices)
 	}
 	if err != nil {
 		sdk.release()
 		ShutdownDDS()
 		return nil, fmt.Errorf("load arm model: %w", err)
-	}
-	if got := len(model.DoF()); got != G1ArmDoF {
-		sdk.release()
-		ShutdownDDS()
-		return nil, fmt.Errorf("arm model must have %d DoF, got %d", G1ArmDoF, got)
 	}
 
 	kp := append([]float32(nil), defaultArmKp...)
@@ -179,7 +237,7 @@ func newG1Arm(ctx context.Context, conf resource.Config, logger logging.Logger, 
 		model:     model,
 		kp:        kp,
 		kd:        kd,
-		commanded: make([]float64, G1ArmDoF),
+		commanded: make([]float64, len(indices)),
 	}
 
 	// Arms start dormant (weight=0, no DDS writer registered). This
@@ -187,22 +245,8 @@ func newG1Arm(ctx context.Context, conf resource.Config, logger logging.Logger, 
 	// Use the "engage" DoCommand to take ownership (weight=1) when
 	// you're ready to control the arms — this creates the DDS writer
 	// and switches firmware to low-level/arm_sdk mode.
-	logger.Infof("g1Arm (%s) initialized with %d DoF", a.sideName(), len(model.DoF()))
+	logger.Infof("g1 %s initialized with %d DoF", side, len(model.DoF()))
 	return a, nil
-}
-
-func (a *g1Arm) sideName() string {
-	if a.side == sideLeft {
-		return "left"
-	}
-	return "right"
-}
-
-func loadArmModel(path, name string) (referenceframe.Model, error) {
-	if len(path) > 5 && path[len(path)-5:] == ".urdf" {
-		return referenceframe.ParseModelXMLFile(path, name, nil)
-	}
-	return referenceframe.ParseModelJSONFile(path, name)
 }
 
 func (a *g1Arm) Kinematics(ctx context.Context) (referenceframe.Model, error) {
@@ -219,14 +263,14 @@ func (a *g1Arm) JointPositions(ctx context.Context, extra map[string]interface{}
 		}
 		return out, nil
 	}
+	if a.side == sideBody {
+		// The body is never commanded, so there is no setpoint to fall back to.
+		return nil, errors.New("no rt/lowstate received yet")
+	}
 
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	out := make([]referenceframe.Input, len(a.commanded))
-	for i, p := range a.commanded {
-		out[i] = p
-	}
-	return out, nil
+	return append([]referenceframe.Input(nil), a.commanded...), nil
 }
 
 func (a *g1Arm) EndPosition(ctx context.Context, extra map[string]interface{}) (spatialmath.Pose, error) {
@@ -242,9 +286,6 @@ func (a *g1Arm) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra
 }
 
 func (a *g1Arm) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
-	if err := arm.CheckDesiredJointPositions(ctx, a, positions); err != nil {
-		return err
-	}
 	return a.commandPositions(ctx, positions)
 }
 
@@ -269,11 +310,21 @@ func (a *g1Arm) MoveThroughJointPositions(
 	return nil
 }
 
-// commandPositions writes new setpoints into the shared LowCmd snapshot. The
-// publisher loop on armSDK handles the actual DDS write at its own cadence.
+// commandPositions checks and writes new setpoints into the shared LowCmd
+// snapshot. The publisher loop on armSDK handles the actual DDS write at its
+// own cadence. It is the only path to motor commands, so the body is refused
+// here, before anything else runs.
 func (a *g1Arm) commandPositions(ctx context.Context, positions []referenceframe.Input) error {
+	if a.side == sideBody {
+		return errors.New("g1-body is read-only; move the arms with g1-left-arm / g1-right-arm")
+	}
+	// Check the length first: CheckDesiredJointPositions indexes the limits by input and panics
+	// on extra inputs.
 	if len(positions) != len(a.indices) {
 		return fmt.Errorf("expected %d joint positions, got %d", len(a.indices), len(positions))
+	}
+	if err := arm.CheckDesiredJointPositions(ctx, a, positions); err != nil {
+		return err
 	}
 
 	q := make([]float32, len(positions))
@@ -282,9 +333,7 @@ func (a *g1Arm) commandPositions(ctx context.Context, positions []referenceframe
 	}
 
 	a.mu.Lock()
-	for i, p := range positions {
-		a.commanded[i] = p
-	}
+	copy(a.commanded, positions)
 	a.lastCmdTime = time.Now()
 	a.mu.Unlock()
 
@@ -397,6 +446,10 @@ func (a *g1Arm) ManualMode(ctx context.Context, extra map[string]interface{}) (b
 
 func (a *g1Arm) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	cmdStr, _ := cmd["command"].(string)
+	if a.side == sideBody && cmdStr != "" {
+		// arm_sdk weight is shared with the arms; don't let the read-only body take them over.
+		return map[string]interface{}{"error": "g1-body has no commands; use an arm component"}, nil
+	}
 	switch cmdStr {
 	case "release":
 		// Gradually ramp weight down to surrender control back to sport.

@@ -59,29 +59,6 @@ const (
 	G1ArmDoF = 7
 )
 
-// LeftArmJointIndices and RightArmJointIndices give the motor-array indices
-// for each arm in shoulder-to-wrist order.
-var (
-	LeftArmJointIndices = []int{
-		G1JointLeftShoulderPitch,
-		G1JointLeftShoulderRoll,
-		G1JointLeftShoulderYaw,
-		G1JointLeftElbow,
-		G1JointLeftWristRoll,
-		G1JointLeftWristPitch,
-		G1JointLeftWristYaw,
-	}
-	RightArmJointIndices = []int{
-		G1JointRightShoulderPitch,
-		G1JointRightShoulderRoll,
-		G1JointRightShoulderYaw,
-		G1JointRightElbow,
-		G1JointRightWristRoll,
-		G1JointRightWristPitch,
-		G1JointRightWristYaw,
-	}
-)
-
 // armSDK is a process-wide singleton that owns the rt/arm_sdk publisher and
 // the rt/lowstate subscriber. The two arm components (left + right) share
 // the same writer/reader and use disjoint slices of the motor array.
@@ -344,10 +321,7 @@ func (a *armSDK) ensureEngaged() error {
 	// Seed both arms to their current measured positions so the handoff holds
 	// pose rather than jerking toward q=0.
 	a.mu.Lock()
-	for _, idx := range LeftArmJointIndices {
-		a.commanded[idx].q = a.latestState.motor_state[idx].q
-	}
-	for _, idx := range RightArmJointIndices {
+	for idx := G1JointLeftShoulderPitch; idx <= G1JointRightWristYaw; idx++ {
 		a.commanded[idx].q = a.latestState.motor_state[idx].q
 	}
 	a.mu.Unlock()

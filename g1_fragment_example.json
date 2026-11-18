@@ -1,0 +1,75 @@
+{
+  "modules": [
+    {
+      "type": "registry",
+      "name": "erh_viam-unitree",
+      "module_id": "erh:viam-unitree",
+      "version": "latest"
+    }
+  ],
+  "components": [
+    {
+      "name": "g1",
+      "api": "rdk:component:generic",
+      "model": "erh:viam-unitree:g1",
+      "attributes": {}
+    },
+    {
+      "name": "base",
+      "api": "rdk:component:base",
+      "model": "erh:viam-unitree:g1-base",
+      "attributes": {},
+      "frame": { "parent": "world" }
+    },
+    {
+      "name": "body",
+      "api": "rdk:component:arm",
+      "model": "erh:viam-unitree:g1-body",
+      "attributes": {},
+      "frame": { "parent": "base", "translation": { "x": 0, "y": 0, "z": 793 } }
+    },
+    {
+      "name": "left-arm",
+      "api": "rdk:component:arm",
+      "model": "erh:viam-unitree:g1-left-arm",
+      "attributes": {},
+      "frame": { "parent": "body" }
+    },
+    {
+      "name": "right-arm",
+      "api": "rdk:component:arm",
+      "model": "erh:viam-unitree:g1-right-arm",
+      "attributes": {},
+      "frame": { "parent": "body" }
+    },
+    {
+      "name": "camera",
+      "api": "rdk:component:camera",
+      "model": "erh:viam-unitree:g1-camera",
+      "attributes": {},
+      "frame": {
+        "parent": "body",
+        "translation": { "x": 57.6235, "y": 17.53, "z": 419.87 },
+        "orientation": { "type": "ov_degrees", "value": { "x": 0.6743, "y": 0, "z": -0.7385, "th": -90 } }
+      }
+    },
+    {
+      "name": "lidar",
+      "api": "rdk:component:camera",
+      "model": "erh:viam-unitree:g1-lidar",
+      "attributes": {},
+      "frame": {
+        "parent": "body",
+        "translation": { "x": 0.2835, "y": 0.03, "z": 406.18 },
+        "orientation": { "type": "ov_degrees", "value": { "x": 0.0401, "y": 0, "z": 0.9992, "th": 0 } }
+      }
+    },
+    {
+      "name": "odometry",
+      "api": "rdk:component:movement_sensor",
+      "model": "erh:viam-unitree:g1-movementsensor",
+      "attributes": {},
+      "frame": { "parent": "base", "translation": { "x": 0, "y": 0, "z": 793 } }
+    }
+  ]
+}

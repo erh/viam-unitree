@@ -1,0 +1,152 @@
+package main
+
+import (
+	"math"
+	"slices"
+	"testing"
+
+	"github.com/golang/geo/r3"
+
+	"go.viam.com/rdk/referenceframe"
+	"go.viam.com/rdk/spatialmath"
+)
+
+func zeroPose(t *testing.T, m referenceframe.Model) spatialmath.Pose {
+	t.Helper()
+	pose, err := m.Transform(make([]referenceframe.Input, len(m.DoF())))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pose
+}
+
+func near(t *testing.T, what string, got, want r3.Vector) {
+	t.Helper()
+	if got.Sub(want).Norm() > 0.5 {
+		t.Errorf("%s: got %v, want %v (mm)", what, got, want)
+	}
+}
+
+func TestG1Kinematics(t *testing.T) {
+	body, err := g1BodyKinematics("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	left, err := g1LeftArmKinematics("left")
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := g1RightArmKinematics("right")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Every model joint maps to a motor; together they cover all 29 exactly once.
+	var all []int
+	for _, m := range []referenceframe.Model{body, left, right} {
+		idx, err := g1JointIndices(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, idx...)
+	}
+	slices.Sort(all)
+	for i, v := range all {
+		if v != i {
+			t.Fatalf("motor indices %v, want 0..28 once each", all)
+		}
+	}
+	if idx, _ := g1JointIndices(left); idx[0] != G1JointLeftShoulderPitch || idx[6] != G1JointLeftWristYaw {
+		t.Errorf("left arm indices %v not shoulder-to-wrist", idx)
+	}
+
+	// pelvis -> torso_link: waist_roll origin + waist_pitch origin.
+	near(t, "torso", zeroPose(t, body).Point(), r3.Vector{X: -3.9635, Y: 0, Z: 54})
+
+	// torso_link -> palm, summed by hand from the URDF (shoulder_pitch rolls 0.27931 rad, so
+	// shoulder_roll's (0, 38, -13.831) offset lands at (0, 40.34, -2.82)).
+	near(t, "left hand", zeroPose(t, left).Point(), r3.Vector{X: 245.24, Y: 151.69, Z: 41.24})
+	near(t, "right hand", zeroPose(t, right).Point(), r3.Vector{X: 245.24, Y: -151.68, Z: 41.24})
+
+	// The legs branch off pelvis next to the waist; RDK's URDF parser would put both hips at the
+	// last child's origin.
+	lFoot, err := g1Kinematics("l", "pelvis", "left_ankle_roll_link")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rFoot, err := g1Kinematics("r", "pelvis", "right_ankle_roll_link")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lp, rp := zeroPose(t, lFoot).Point(), zeroPose(t, rFoot).Point()
+	if lp.Y < 100 || math.Abs(lp.Y+rp.Y) > 0.5 || math.Abs(lp.Z-rp.Z) > 0.5 {
+		t.Errorf("feet not mirrored: left %v right %v", lp, rp)
+	}
+
+	// One collision box per meshed link, placed in that link's frame. head_link hangs off a fixed
+	// offset that cancels torso_link's, so its box lands at its table center in the body frame.
+	if n := len(zeroBoxes(t, body)); n != 20 {
+		t.Errorf("body has %d boxes, want 20", n)
+	}
+	near(t, "head box", zeroBoxes(t, body)["body:head_link"], r3.Vector{X: 4, Y: 0, Z: 428})
+	near(t, "left hand box", zeroBoxes(t, left)["left:left_rubber_hand"], r3.Vector{X: 311.24, Y: 136.65, Z: 51.23})
+	near(t, "right hand box", zeroBoxes(t, right)["right:right_rubber_hand"], r3.Vector{X: 311.24, Y: -136.64, Z: 51.23})
+
+	// The model survives the trip to viam-server (GetKinematics) unchanged.
+	back, err := referenceframe.KinematicModelFromProtobuf("body", referenceframe.KinematicModelToProtobuf(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !spatialmath.PoseAlmostEqual(zeroPose(t, back), zeroPose(t, body)) || len(back.DoF()) != 15 ||
+		len(zeroBoxes(t, back)) != 20 {
+		t.Errorf("round trip changed the model")
+	}
+}
+
+// zeroBoxes returns each collision box's center at zero joint angles, keyed by label.
+func zeroBoxes(t *testing.T, m referenceframe.Model) map[string]r3.Vector {
+	t.Helper()
+	gif, err := m.Geometries(make([]referenceframe.Input, len(m.DoF())))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]r3.Vector{}
+	for _, g := range gif.Geometries() {
+		out[g.Label()] = g.Pose().Point()
+	}
+	return out
+}
+
+func TestCheckJoints(t *testing.T) {
+	models := map[armSide]func(string) (referenceframe.Model, error){
+		sideLeft: g1LeftArmKinematics, sideRight: g1RightArmKinematics, sideBody: g1BodyKinematics,
+	}
+	for side, build := range models {
+		m, err := build(side.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		idx, err := g1JointIndices(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Each embedded model is exactly its side's joints, and no other side's.
+		for other := range models {
+			if err := other.checkJoints(idx); (err == nil) != (other == side) {
+				t.Errorf("%s model checked as %s: %v", side, other, err)
+			}
+		}
+		// A missing or repeated joint is caught; order doesn't matter.
+		if err := side.checkJoints(idx[1:]); err == nil {
+			t.Errorf("%s model missing %s passed", side, g1MotorJoints[idx[0]])
+		}
+		if err := side.checkJoints(append(slices.Clone(idx[1:]), idx[1])); err == nil {
+			t.Errorf("%s model with %s twice passed", side, g1MotorJoints[idx[1]])
+		}
+		reversed := slices.Clone(idx)
+		slices.Reverse(reversed)
+		if err := side.checkJoints(reversed); err != nil {
+			t.Errorf("%s model reversed: %v", side, err)
+		}
+	}
+}
