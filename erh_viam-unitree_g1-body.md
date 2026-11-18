@@ -49,6 +49,9 @@ left_ankle_pitch, right_ankle_pitch, left_ankle_roll, right_ankle_roll.
 
 ## Caveats
 
-- No collision geometry or meshes yet: the URDF's meshes (about 25 MB of STL) are not embedded.
+- Collision geometry is one box per link (body and arms), sized to the bounds of the upstream
+  meshes. The meshes themselves (about 25 MB of STL) are not embedded, so the 3D view shows boxes.
+- The motion planner ignores shape pairs that already overlap at the start of a move, so an arm
+  resting against the torso box may pass through it during that move.
 - Motion planning: plan arm goals in the `body` frame. A goal in `world` puts the body's
   joints in the planner's chain, and the body refuses to move.

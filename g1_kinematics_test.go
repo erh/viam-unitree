@@ -83,12 +83,36 @@ func TestG1Kinematics(t *testing.T) {
 		t.Errorf("feet not mirrored: left %v right %v", lp, rp)
 	}
 
+	// One collision box per meshed link, placed in that link's frame. head_link hangs off a fixed
+	// offset that cancels torso_link's, so its box lands at its table center in the body frame.
+	if n := len(zeroBoxes(t, body)); n != 20 {
+		t.Errorf("body has %d boxes, want 20", n)
+	}
+	near(t, "head box", zeroBoxes(t, body)["body:head_link"], r3.Vector{X: 4, Y: 0, Z: 428})
+	near(t, "left hand box", zeroBoxes(t, left)["left:left_rubber_hand"], r3.Vector{X: 311.24, Y: 136.65, Z: 51.23})
+	near(t, "right hand box", zeroBoxes(t, right)["right:right_rubber_hand"], r3.Vector{X: 311.24, Y: -136.64, Z: 51.23})
+
 	// The model survives the trip to viam-server (GetKinematics) unchanged.
 	back, err := referenceframe.KinematicModelFromProtobuf("body", referenceframe.KinematicModelToProtobuf(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !spatialmath.PoseAlmostEqual(zeroPose(t, back), zeroPose(t, body)) || len(back.DoF()) != 15 {
+	if !spatialmath.PoseAlmostEqual(zeroPose(t, back), zeroPose(t, body)) || len(back.DoF()) != 15 ||
+		len(zeroBoxes(t, back)) != 20 {
 		t.Errorf("round trip changed the model")
 	}
+}
+
+// zeroBoxes returns each collision box's center at zero joint angles, keyed by label.
+func zeroBoxes(t *testing.T, m referenceframe.Model) map[string]r3.Vector {
+	t.Helper()
+	gif, err := m.Geometries(make([]referenceframe.Input, len(m.DoF())))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]r3.Vector{}
+	for _, g := range gif.Geometries() {
+		out[g.Label()] = g.Pose().Point()
+	}
+	return out
 }
