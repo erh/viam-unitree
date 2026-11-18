@@ -169,19 +169,34 @@ func newG1V4L2Camera(
 					errs = multierr.Append(errs, fmt.Errorf("%s/%s/%dx%d open: %w", label, format, m.w, m.h, err))
 					continue
 				}
-				// Opening isn't enough: on a degraded USB link the device opens
-				// but never delivers frames (read timeout) — e.g. YUYV 640x480@30
-				// is ~18MB/s and won't sustain over USB2, while MJPEG will.
-				// Verify we can actually read a frame; if not, release it and try
-				// the next format/mode so we land on one that truly streams.
-				vctx, cancel := context.WithTimeout(ctx, 4*time.Second)
-				_, _, verr := cam.Images(vctx, nil, nil)
-				cancel()
-				if verr == nil {
+				// Opening isn't enough — confirm the device actually delivers a
+				// frame. But POLL for several seconds: a healthy RealSense returns
+				// "no frames available" on the first read(s) while the stream
+				// warms up after STREAMON, so a single immediate read would
+				// wrongly reject a working camera (v4l2-ctl succeeds precisely
+				// because it keeps polling). Only if NO frame arrives within the
+				// window is it genuinely not streaming — then try the next mode.
+				streamed := false
+				var verr error
+				deadline := time.Now().Add(6 * time.Second)
+				for time.Now().Before(deadline) {
+					vctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+					_, _, verr = cam.Images(vctx, nil, nil)
+					cancel()
+					if verr == nil {
+						streamed = true
+						break
+					}
+					if serr := sleepCtx(ctx, 250*time.Millisecond); serr != nil {
+						_ = cam.Close(ctx)
+						return nil, serr
+					}
+				}
+				if streamed {
 					logger.Infof("G1Camera using V4L2 device %s (format %s %dx%d)", label, format, m.w, m.h)
 					return cam, nil
 				}
-				logger.Debugf("G1Camera: %s opened (%s %dx%d) but no frame: %v", label, format, m.w, m.h, verr)
+				logger.Debugf("G1Camera: %s opened (%s %dx%d) but no frame after warmup: %v", label, format, m.w, m.h, verr)
 				errs = multierr.Append(errs, fmt.Errorf("%s/%s/%dx%d stream: %w", label, format, m.w, m.h, verr))
 				_ = cam.Close(ctx)
 			}
