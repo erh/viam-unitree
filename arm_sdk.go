@@ -446,26 +446,32 @@ func (a *armSDK) run() {
 func (a *armSDK) snapshotLocked() C.unitree_hg_lowcmd_t {
 	var cmd C.unitree_hg_lowcmd_t
 
-	// Echo mode fields from the latest lowstate (required by firmware).
+	// Echo mode fields from the latest lowstate.
 	if a.hasState.Load() {
 		cmd.mode_pr = a.latestState.mode_pr
 		cmd.mode_machine = a.latestState.mode_machine
 	}
 
-	// Command ONLY the arm joints (15-28) plus the arm_sdk weight (motor 29).
-	// Every other motor is left at mode=0, which hands the legs/waist entirely
-	// to the locomotion controller so the robot keeps balancing while the arms
-	// move. Earlier versions echoed leg positions here with kp=40, which
-	// superimposed an independent position servo on top of the balance
-	// controller and fought it; Unitree's official g1_arm_sdk example never
-	// writes the leg motors — the weight at motor 29 blends ONLY the arms.
-	for _, idx := range LeftArmJointIndices {
-		cmd.motor_cmd[idx] = a.commanded[idx]
+	for i := 0; i < G1NumMotors; i++ {
+		cmd.motor_cmd[i] = a.commanded[i]
 	}
-	for _, idx := range RightArmJointIndices {
-		cmd.motor_cmd[idx] = a.commanded[idx]
+
+	// For non-arm motors (legs 0-14, and motors 30-34): echo current position
+	// from lowstate so that when weight > 0 the firmware holds these joints at
+	// their current position rather than commanding them to q=0 with zero
+	// torque. This is REQUIRED on this firmware: leaving the legs uncommanded
+	// (mode=0) does NOT keep them under the locomotion controller — the body
+	// drops to zero torque and the torso collapses. (An earlier attempt to
+	// command only the arms, per the official arm_sdk example, caused exactly
+	// that on-hardware, so we keep echoing the legs here.)
+	if a.hasState.Load() {
+		for i := 0; i < G1JointLeftShoulderPitch; i++ {
+			cmd.motor_cmd[i].q = a.latestState.motor_state[i].q
+		}
+		for i := G1ArmSDKWeightIndex + 1; i < G1NumMotors; i++ {
+			cmd.motor_cmd[i].q = a.latestState.motor_state[i].q
+		}
 	}
-	cmd.motor_cmd[G1ArmSDKWeightIndex].q = a.commanded[G1ArmSDKWeightIndex].q
 
 	// CRC32 over the entire struct excluding the crc field itself.
 	cmd.crc = crc32Unitree(unsafe.Slice((*byte)(unsafe.Pointer(&cmd)), unsafe.Sizeof(cmd)-4))
