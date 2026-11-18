@@ -12,3 +12,22 @@ Viam module for the Unitree G1 humanoid robot.
 - [`erh:viam-unitree:g1-right-arm`](erh_viam-unitree_g1-arm.md) - Right arm joint control via arm_sdk
 - [`erh:viam-unitree:g1-body`](erh_viam-unitree_g1-body.md) - Read-only pelvis/legs/waist kinematics; parent of the arms in the frame system
 - [`erh:viam-unitree:g1-movementsensor`](erh_viam-unitree_g1-movementsensor.md) - Odometer movement sensor (pose, velocity, orientation)
+
+## Example fragment
+
+[`g1_fragment_example.json`](g1_fragment_example.json) configures every model with its frame,
+so the whole robot shows up connected in the frame system:
+
+```
+world
+└── base                 ground under the pelvis
+    ├── body             pelvis, 793 mm up (legs straight); its end is torso_link
+    │   ├── left-arm     torso_link → left palm
+    │   ├── right-arm    torso_link → right palm
+    │   ├── camera       head camera (d435_link), optical frame: z out of the lens, x right
+    │   └── lidar        mid360_link
+    └── odometry         at the pelvis
+```
+
+The `g1` generic component has no frame. Offsets come from the URDF; the base-to-pelvis height
+assumes straight legs, so the feet sit a little below the ground in a bent-knee stance.
