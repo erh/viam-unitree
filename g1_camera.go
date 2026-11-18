@@ -164,21 +164,50 @@ func newG1V4L2Camera(
 					label = "<any device>"
 				}
 				cam, err := tryOpen(path, format, m.w, m.h)
-				if err == nil {
+				if err != nil {
+					logger.Debugf("G1Camera: cannot open %s (%s %dx%d): %v", label, format, m.w, m.h, err)
+					errs = multierr.Append(errs, fmt.Errorf("%s/%s/%dx%d open: %w", label, format, m.w, m.h, err))
+					continue
+				}
+				// Opening isn't enough: on a degraded USB link the device opens
+				// but never delivers frames (read timeout) — e.g. YUYV 640x480@30
+				// is ~18MB/s and won't sustain over USB2, while MJPEG will.
+				// Verify we can actually read a frame; if not, release it and try
+				// the next format/mode so we land on one that truly streams.
+				vctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+				_, _, verr := cam.Images(vctx, nil, nil)
+				cancel()
+				if verr == nil {
 					logger.Infof("G1Camera using V4L2 device %s (format %s %dx%d)", label, format, m.w, m.h)
 					return cam, nil
 				}
-				logger.Debugf("G1Camera: cannot open %s (%s %dx%d): %v", label, format, m.w, m.h, err)
-				errs = multierr.Append(errs, fmt.Errorf("%s/%s/%dx%d: %w", label, format, m.w, m.h, err))
+				logger.Debugf("G1Camera: %s opened (%s %dx%d) but no frame: %v", label, format, m.w, m.h, verr)
+				errs = multierr.Append(errs, fmt.Errorf("%s/%s/%dx%d stream: %w", label, format, m.w, m.h, verr))
+				_ = cam.Close(ctx)
 			}
 		}
 	}
 	return nil, fmt.Errorf("no usable color V4L2 camera found (is the module running on the G1 dev computer with the head camera attached? set video_path/format to choose a device): %w", errs)
 }
 
-// findRealSenseVideoDevices returns /dev/videoN paths whose V4L2 name
-// mentions RealSense, in numeric order.
+// findRealSenseVideoDevices returns candidate RealSense capture-node paths.
+//
+// It prefers the STABLE /dev/v4l/by-id symlinks over raw /dev/videoN: the
+// RealSense re-enumerates to different /dev/videoN numbers across USB resets
+// (which happen on power glitches, and when the robot falls), and the webcam
+// driver pins to the exact path it opened. A raw /dev/video4 becomes "no such
+// device" after a reset; the by-id symlink keeps resolving to the color node,
+// so the driver's auto-reconnect works. Only the color node advertises YUYV,
+// so the caller's YUYV-first probe still selects the right node among these.
 func findRealSenseVideoDevices(logger logging.Logger) []string {
+	if byID, err := filepath.Glob("/dev/v4l/by-id/*RealSense*"); err == nil && len(byID) > 0 {
+		sort.Strings(byID) // video-index0 (color) first
+		for _, e := range byID {
+			logger.Debugf("G1Camera: RealSense by-id node %s", e)
+		}
+		return byID
+	}
+	// Fallback: /sys name-based /dev/videoN discovery (unstable numbering).
 	entries, err := filepath.Glob("/sys/class/video4linux/video*")
 	if err != nil {
 		return nil
