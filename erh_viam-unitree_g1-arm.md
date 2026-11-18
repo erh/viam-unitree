@@ -23,7 +23,7 @@ held at 1.0 so `arm_sdk` fully overrides sport-mode arm motion. The DoCommand
 | Name                | Type      | Inclusion | Description                                                                          |
 |---------------------|-----------|-----------|--------------------------------------------------------------------------------------|
 | `network_interface` | string    | Optional  | Network interface for DDS communication (default: `eth0`).                           |
-| `model_path`        | string    | Optional  | Override the embedded kinematics (`.urdf` or `.json`). Joint names must be G1 joint names (e.g. `left_elbow_joint`). |
+| `model_path`        | string    | Optional  | Override the embedded kinematics (`.urdf` or `.json`). It must have exactly that arm's 7 joints, named as in the G1 URDF (e.g. `left_elbow_joint`), in any order. |
 | `kp`                | float[7]  | Optional  | Per-joint position gains. Defaults: `[60, 60, 60, 60, 30, 30, 30]`.                  |
 | `kd`                | float[7]  | Optional  | Per-joint velocity gains. Defaults: `[1.5, 1.5, 1.5, 1.5, 1.0, 1.0, 1.0]`.           |
 

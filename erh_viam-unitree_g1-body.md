@@ -38,7 +38,7 @@ camera optical frames.
 | Name                | Type   | Inclusion | Description                                                              |
 |---------------------|--------|-----------|--------------------------------------------------------------------------|
 | `network_interface` | string | Optional  | Network interface for DDS communication (default: `eth0`).               |
-| `model_path`        | string | Optional  | Replace the embedded kinematics (`.json` or `.urdf`). Joint names must be G1 joint names. |
+| `model_path`        | string | Optional  | Replace the embedded kinematics (`.json` or `.urdf`). It must have exactly the 15 leg and waist joints listed below, in any order. |
 
 ## Joint order
 

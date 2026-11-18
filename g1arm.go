@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -79,6 +80,49 @@ const (
 	sideBody
 )
 
+func (s armSide) String() string {
+	switch s {
+	case sideLeft:
+		return "left arm"
+	case sideRight:
+		return "right arm"
+	default:
+		return "body"
+	}
+}
+
+// motors is the rt/lowstate motor index range [lo, hi) that the side's model must cover.
+func (s armSide) motors() (lo, hi int) {
+	switch s {
+	case sideLeft:
+		return G1JointLeftShoulderPitch, G1JointLeftWristYaw + 1
+	case sideRight:
+		return G1JointRightShoulderPitch, G1JointRightWristYaw + 1
+	default:
+		return G1JointLeftHipPitch, G1JointWaistPitch + 1
+	}
+}
+
+// checkJoints reports an error unless indices, a model's motor indices from g1JointIndices, hold
+// each of the side's motors exactly once, in any order.
+func (s armSide) checkJoints(indices []int) error {
+	lo, hi := s.motors()
+	seen := make([]bool, hi-lo)
+	for _, idx := range indices {
+		if idx < lo || idx >= hi {
+			return fmt.Errorf("the %s model has joint %s, which is not a %s joint", s, g1MotorJoints[idx], s)
+		}
+		if seen[idx-lo] {
+			return fmt.Errorf("the %s model has joint %s twice", s, g1MotorJoints[idx])
+		}
+		seen[idx-lo] = true
+	}
+	if i := slices.Index(seen, false); i >= 0 {
+		return fmt.Errorf("the %s model must have %d DoF, got %d: it is missing %s", s, hi-lo, len(indices), g1MotorJoints[lo+i])
+	}
+	return nil
+}
+
 // Default position/velocity gains. The G1 arm motors are relatively low
 // gear-ratio direct drive so values in this range are a reasonable start.
 // Tune via the Kp/Kd config keys if needed.
@@ -147,8 +191,8 @@ func newG1Arm(ctx context.Context, conf resource.Config, logger logging.Logger, 
 	if err == nil {
 		indices, err = g1JointIndices(model)
 	}
-	if err == nil && side != sideBody && len(indices) != G1ArmDoF {
-		err = fmt.Errorf("arm model must have %d DoF, got %d", G1ArmDoF, len(indices))
+	if err == nil {
+		err = side.checkJoints(indices)
 	}
 	if err != nil {
 		sdk.release()
@@ -182,19 +226,8 @@ func newG1Arm(ctx context.Context, conf resource.Config, logger logging.Logger, 
 	// Use the "engage" DoCommand to take ownership (weight=1) when
 	// you're ready to control the arms — this creates the DDS writer
 	// and switches firmware to low-level/arm_sdk mode.
-	logger.Infof("g1Arm (%s) initialized with %d DoF", a.sideName(), len(model.DoF()))
+	logger.Infof("g1 %s initialized with %d DoF", side, len(model.DoF()))
 	return a, nil
-}
-
-func (a *g1Arm) sideName() string {
-	switch a.side {
-	case sideLeft:
-		return "left"
-	case sideRight:
-		return "right"
-	default:
-		return "body"
-	}
 }
 
 func (a *g1Arm) Kinematics(ctx context.Context) (referenceframe.Model, error) {

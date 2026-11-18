@@ -116,3 +116,37 @@ func zeroBoxes(t *testing.T, m referenceframe.Model) map[string]r3.Vector {
 	}
 	return out
 }
+
+func TestCheckJoints(t *testing.T) {
+	models := map[armSide]func(string) (referenceframe.Model, error){
+		sideLeft: g1LeftArmKinematics, sideRight: g1RightArmKinematics, sideBody: g1BodyKinematics,
+	}
+	for side, build := range models {
+		m, err := build(side.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		idx, err := g1JointIndices(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Each embedded model is exactly its side's joints, and no other side's.
+		for other := range models {
+			if err := other.checkJoints(idx); (err == nil) != (other == side) {
+				t.Errorf("%s model checked as %s: %v", side, other, err)
+			}
+		}
+		// A missing or repeated joint is caught; order doesn't matter.
+		if err := side.checkJoints(idx[1:]); err == nil {
+			t.Errorf("%s model missing %s passed", side, g1MotorJoints[idx[0]])
+		}
+		if err := side.checkJoints(append(slices.Clone(idx[1:]), idx[1])); err == nil {
+			t.Errorf("%s model with %s twice passed", side, g1MotorJoints[idx[1]])
+		}
+		reversed := slices.Clone(idx)
+		slices.Reverse(reversed)
+		if err := side.checkJoints(reversed); err != nil {
+			t.Errorf("%s model reversed: %v", side, err)
+		}
+	}
+}
