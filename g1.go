@@ -32,7 +32,8 @@ type g1 struct {
 
 	logger logging.Logger
 	loco   *LocoClient
-	arm    *ArmActionClient // built-in gestures; nil if arm service unavailable
+	arm    *ArmActionClient      // built-in gestures; nil if arm service unavailable
+	motion *MotionSwitcherClient // reads the running motion controller; nil if unavailable
 }
 
 func newG1(ctx context.Context, deps resource.Dependencies, conf resource.Config, logger logging.Logger) (resource.Resource, error) {
@@ -63,6 +64,11 @@ func newG1(ctx context.Context, deps resource.Dependencies, conf resource.Config
 		logger.Warnf("G1: arm action client unavailable (gestures may fail): %v", err)
 	}
 
+	motion, err := NewMotionSwitcherClient()
+	if err != nil {
+		logger.Warnf("G1: motion switcher client unavailable (motion_mode won't work): %v", err)
+	}
+
 	logger.Info("G1 initialized successfully")
 
 	return &g1{
@@ -70,6 +76,7 @@ func newG1(ctx context.Context, deps resource.Dependencies, conf resource.Config
 		logger: logger,
 		loco:   loco,
 		arm:    arm,
+		motion: motion,
 	}, nil
 }
 
@@ -89,32 +96,70 @@ func (g *g1) executeArmAction(taskID int) error {
 	return g.loco.SetArmTask(taskID)
 }
 
-// readyToMove runs the post-boot sequence to get the G1 into a state
-// that accepts Move commands. Sequence:
+// readyToMove gets the G1 into a state that accepts Move commands; see
+// runReadyToMove. From power-up the sequence is:
 //   Damp (1) → StandUp (4) → SetBalanceMode(1) → Run (802)
+// A standing or walking robot skips the steps it doesn't need.
 //
-// This is intentionally minimal — just 4 RPC calls with sleeps between.
-// Issuing many rapid RPCs (logFsm reads, transitionFsm pre/post checks)
-// creates enough DDS waitset churn on the shared participant to corrupt
-// internal CycloneDDS state and break the videohub (camera) reader.
-// The manual DoCommand equivalents of these 4 calls were verified to
-// leave both walking and camera functional.
-func (g *g1) readyToMove(ctx context.Context) error {
-	return runReadyToMove(ctx, g.loco, g.logger)
+// This is intentionally minimal: one FSM read and at most 4 RPC calls, with
+// sleeps between. Issuing many rapid RPCs (logFsm reads, transitionFsm
+// pre/post checks) creates enough DDS waitset churn on the shared participant
+// to corrupt internal CycloneDDS state and break the videohub (camera) reader.
+// The manual DoCommand equivalents of these 4 calls were verified to leave
+// both walking and camera functional.
+func (g *g1) readyToMove(ctx context.Context, force bool) error {
+	return runReadyToMove(ctx, g.loco, g.logger, force)
 }
 
-// runReadyToMove is the shared post-boot sequence, usable by any component
-// holding a LocoClient (the g1 generic component and the g1-mode switch).
-func runReadyToMove(ctx context.Context, loco *LocoClient, logger logging.Logger) error {
+// fsmClient is the part of LocoClient that runReadyToMove uses.
+type fsmClient interface {
+	GetFsmID() (int, error)
+	SetFsmID(fsmID int) error
+	SetBalanceMode(mode int) error
+}
+
+// readyToMoveSleep waits between FSM steps; tests replace it.
+var readyToMoveSleep = sleepCtx
+
+// runReadyToMove gets the G1 into walk mode, usable by any component holding a
+// LocoClient (the g1 generic component and the g1-mode switch). It reads the FSM
+// state first and does only what's missing:
+//   - already walking (Run, 802): nothing
+//   - standing (StandUp 4, Start 200): SetBalanceMode(1) → Run
+//   - anything else, or the state can't be read: Damp → StandUp → SetBalanceMode(1) → Run
+//
+// force runs the full sequence whatever the FSM state says: the robot can
+// report walk mode (802) while its motors are off after a fault.
+//
+// Damp only belongs to the start-up sequence: from a standing robot it takes the
+// motors to damping, and the robot sags before it stands up again.
+func runReadyToMove(ctx context.Context, loco fsmClient, logger logging.Logger, force bool) error {
 	// The firmware rejects FSM transitions while arm_sdk is open.
 	if err := releaseArmSDK(); err != nil {
 		return fmt.Errorf("release arm_sdk: %w", err)
 	}
+
+	fsm, err := loco.GetFsmID()
+	switch {
+	case force:
+		logger.Infof("readyToMove: forced; running the full start-up sequence (FSM %d, read error %v)", fsm, err)
+	case err != nil:
+		logger.Warnf("readyToMove: can't read FSM state (%v); running the full start-up sequence", err)
+	case fsm == FsmRun:
+		logger.Info("readyToMove: already in walk mode")
+		return nil
+	case fsm == FsmStandUp || fsm == FsmStart:
+		logger.Infof("readyToMove: already standing (FSM %d); skipping Damp and StandUp", fsm)
+		return balanceAndRun(ctx, loco, logger)
+	default:
+		logger.Infof("readyToMove: FSM %d; running the full start-up sequence", fsm)
+	}
+
 	logger.Info("readyToMove: Damp")
 	if err := loco.SetFsmID(FsmDamp); err != nil {
 		logger.Warnf("readyToMove: Damp RPC error (may already be in state): %v", err)
 	}
-	if err := sleepCtx(ctx, 1*time.Second); err != nil {
+	if err := readyToMoveSleep(ctx, 1*time.Second); err != nil {
 		return err
 	}
 
@@ -122,15 +167,19 @@ func runReadyToMove(ctx context.Context, loco *LocoClient, logger logging.Logger
 	if err := loco.SetFsmID(FsmStandUp); err != nil {
 		return fmt.Errorf("stand_up: %w", err)
 	}
-	if err := sleepCtx(ctx, 5*time.Second); err != nil {
+	if err := readyToMoveSleep(ctx, 5*time.Second); err != nil {
 		return err
 	}
+	return balanceAndRun(ctx, loco, logger)
+}
 
+// balanceAndRun turns on balance mode and enters walk mode from standing.
+func balanceAndRun(ctx context.Context, loco fsmClient, logger logging.Logger) error {
 	logger.Info("readyToMove: SetBalanceMode(1)")
 	if err := loco.SetBalanceMode(1); err != nil {
 		return fmt.Errorf("set_balance_mode: %w", err)
 	}
-	if err := sleepCtx(ctx, 500*time.Millisecond); err != nil {
+	if err := readyToMoveSleep(ctx, 500*time.Millisecond); err != nil {
 		return err
 	}
 
@@ -138,7 +187,7 @@ func runReadyToMove(ctx context.Context, loco *LocoClient, logger logging.Logger
 	if err := loco.SetFsmID(FsmRun); err != nil {
 		return fmt.Errorf("run: %w", err)
 	}
-	if err := sleepCtx(ctx, 1*time.Second); err != nil {
+	if err := readyToMoveSleep(ctx, 1*time.Second); err != nil {
 		return err
 	}
 
@@ -253,10 +302,32 @@ func (g *g1) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[str
 
 	switch cmdStr {
 	case "ready_to_move":
-		if err := g.readyToMove(ctx); err != nil {
+		// "force": true runs the full start-up sequence even if the robot
+		// reports walk mode or standing, e.g. when it says 802 but is limp.
+		force, _ := cmd["force"].(bool)
+		if err := g.readyToMove(ctx, force); err != nil {
 			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
 		}
 		return map[string]interface{}{"rc": 0.0}, nil
+	case "motion_mode":
+		// Read-only: which motion controller is running (empty name: none).
+		if g.motion == nil {
+			return map[string]interface{}{"rc": -1.0, "error": "motion switcher client unavailable"}, nil
+		}
+		form, name, err := g.motion.CheckMode()
+		if err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
+		return map[string]interface{}{"rc": 0.0, "form": form, "name": name}, nil
+	case "motor_status":
+		// Read-only: every motor's angle, estimated torque, temperatures and
+		// error code from rt/lowstate, plus IMU attitude and arm_sdk state.
+		report, err := motorStatusReport()
+		if err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
+		report["rc"] = 0.0
+		return report, nil
 	case "set_fsm_id":
 		// Set an arbitrary FSM ID. Returns fsm_id before/after so you
 		// can see if it landed. Usage: {"command":"set_fsm_id","id":802}
@@ -438,6 +509,10 @@ func numericToInt(v interface{}) (int, error) {
 }
 
 func (g *g1) Close(ctx context.Context) error {
+	if g.motion != nil {
+		g.motion.Close()
+		g.motion = nil
+	}
 	if g.arm != nil {
 		g.arm.Close()
 		g.arm = nil

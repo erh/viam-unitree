@@ -41,7 +41,7 @@ var switchModes = []struct {
 	{"stand", FsmStandUp, func(ctx context.Context, s *g1Switch) error { return s.loco.SetFsmID(FsmStandUp) }},
 	// "walk" runs the full post-boot sequence (Damp → StandUp → BalanceMode(1)
 	// → Run) and lands the FSM in FsmRun (802), which accepts Move commands.
-	{"walk", FsmRun, func(ctx context.Context, s *g1Switch) error { return runReadyToMove(ctx, s.loco, s.logger) }},
+	{"walk", FsmRun, func(ctx context.Context, s *g1Switch) error { return runReadyToMove(ctx, s.loco, s.logger, false) }},
 }
 
 func init() {
