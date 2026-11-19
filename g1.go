@@ -74,8 +74,12 @@ func newG1(ctx context.Context, deps resource.Dependencies, conf resource.Config
 }
 
 // executeArmAction runs a gesture via the arm service when available, else
-// falls back to sport SetArmTask (older firmwares).
+// falls back to sport SetArmTask (older firmwares). It first hands the arms
+// back from arm_sdk, which would otherwise fight the gesture.
 func (g *g1) executeArmAction(taskID int) error {
+	if err := releaseArmSDK(); err != nil {
+		return fmt.Errorf("release arm_sdk before gesture: %w", err)
+	}
 	if g.arm != nil {
 		if err := g.arm.ExecuteAction(taskID); err != nil {
 			return err
@@ -102,6 +106,10 @@ func (g *g1) readyToMove(ctx context.Context) error {
 // runReadyToMove is the shared post-boot sequence, usable by any component
 // holding a LocoClient (the g1 generic component and the g1-mode switch).
 func runReadyToMove(ctx context.Context, loco *LocoClient, logger logging.Logger) error {
+	// The firmware rejects FSM transitions while arm_sdk is open.
+	if err := releaseArmSDK(); err != nil {
+		return fmt.Errorf("release arm_sdk: %w", err)
+	}
 	logger.Info("readyToMove: Damp")
 	if err := loco.SetFsmID(FsmDamp); err != nil {
 		logger.Warnf("readyToMove: Damp RPC error (may already be in state): %v", err)
@@ -234,6 +242,15 @@ func (g *g1) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[str
 		return map[string]interface{}{"rc": 0.0, "action_id": float64(taskID)}, nil
 	}
 
+	// Mode and FSM changes go through the sport service, which rejects them
+	// while arm_sdk is open. (Gestures and ready_to_move release on their own.)
+	switch cmdStr {
+	case "set_fsm_id", "set_speed_mode", "set_balance_mode", "try_fsm":
+		if err := releaseArmSDK(); err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": "release arm_sdk: " + err.Error()}, nil
+		}
+	}
+
 	switch cmdStr {
 	case "ready_to_move":
 		if err := g.readyToMove(ctx); err != nil {
@@ -341,8 +358,7 @@ func (g *g1) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[str
 		// has ever published, set each, and report which ones actually
 		// move the FSM. Intended to be run once from whatever state the
 		// robot is in, to figure out which transitions the current
-		// firmware honors. Does NOT pause arm_sdk — caller should ensure
-		// arm_sdk is dormant first.
+		// firmware honors. arm_sdk was released above.
 		candidates := []int{
 			FsmZeroTorque, FsmDamp, FsmSquat, FsmSit, FsmStandUp,
 			5, 6, 7, 8, // speculative mid-range IDs some firmwares use

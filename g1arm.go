@@ -240,11 +240,10 @@ func newG1Arm(ctx context.Context, conf resource.Config, logger logging.Logger, 
 		commanded: make([]float64, len(indices)),
 	}
 
-	// Arms start dormant (weight=0, no DDS writer registered). This
-	// keeps the firmware in sport mode so ready_to_move and Move work.
-	// Use the "engage" DoCommand to take ownership (weight=1) when
-	// you're ready to control the arms — this creates the DDS writer
-	// and switches firmware to low-level/arm_sdk mode.
+	// arm_sdk starts released (weight=0, no DDS writer), leaving the robot
+	// to the sport controller. The first arm move engages it (or use the
+	// "engage" DoCommand); gestures, ready_to_move and FSM changes release
+	// it again, as does the "release" DoCommand.
 	logger.Infof("g1 %s initialized with %d DoF", side, len(model.DoF()))
 	return a, nil
 }
@@ -339,8 +338,9 @@ func (a *g1Arm) commandPositions(ctx context.Context, positions []referenceframe
 
 	a.moving.Store(true)
 	// Auto-engage: take arm_sdk ownership (weight→1) on the first move so
-	// jogging from the UI works without a manual "engage" DoCommand. No-op
-	// once already engaged.
+	// jogging from the UI works without a manual "engage" DoCommand. It holds
+	// the current pose while engaging, waits out a release in progress, and
+	// is a no-op once engaged.
 	if err := a.sdk.ensureEngaged(); err != nil {
 		a.moving.Store(false)
 		return err
@@ -452,13 +452,14 @@ func (a *g1Arm) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 	}
 	switch cmdStr {
 	case "release":
-		// Gradually ramp weight down to surrender control back to sport.
-		if err := a.sdk.rampWeight(0, 1*time.Second); err != nil {
+		// Fade out, then close the writer, handing the upper body back to sport.
+		if err := a.sdk.disengage(); err != nil {
 			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
 		}
 		return map[string]interface{}{"rc": 0.0}, nil
 	case "engage":
-		// Gradually ramp weight up for smooth arm_sdk takeover.
+		// Gradually ramp weight up for smooth arm_sdk takeover, holding the
+		// current pose.
 		if err := a.sdk.rampWeight(1, 1*time.Second); err != nil {
 			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
 		}

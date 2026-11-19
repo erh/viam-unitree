@@ -115,7 +115,10 @@ func (b *g1Base) MoveStraight(ctx context.Context, distanceMm int, mmPerSec floa
 		case <-moveCtx.Done():
 			return nil
 		case <-ticker.C:
-			b.loco.Move(vx, 0, 0)
+			if err := b.loco.Move(vx, 0, 0); err != nil {
+				b.loco.StopMove()
+				return moveError(err)
+			}
 		}
 	}
 
@@ -157,7 +160,10 @@ func (b *g1Base) Spin(ctx context.Context, angleDeg, degsPerSec float64, extra m
 		case <-moveCtx.Done():
 			return nil
 		case <-ticker.C:
-			b.loco.Move(0, 0, vyaw)
+			if err := b.loco.Move(0, 0, vyaw); err != nil {
+				b.loco.StopMove()
+				return moveError(err)
+			}
 		}
 	}
 
@@ -215,7 +221,7 @@ func (b *g1Base) startContinuousMove(vx, vy, vyaw float32) error {
 	// can re-StopMove if Stop raced while the RPC was in flight.
 	if err := b.loco.Move(vx, vy, vyaw); err != nil {
 		b.moving.Store(false)
-		return err
+		return moveError(err)
 	}
 
 	select {
@@ -249,7 +255,7 @@ func (b *g1Base) startContinuousMove(vx, vy, vyaw float32) error {
 				return
 			case <-ticker.C:
 				if err := b.loco.Move(vx, vy, vyaw); err != nil {
-					b.logger.Warnf("continuous move failed: %v", err)
+					b.logger.Warnf("continuous move failed: %v", moveError(err))
 				}
 			}
 		}
@@ -332,4 +338,14 @@ func (b *g1Base) Close(ctx context.Context) error {
 	b.loco.Close()
 	ShutdownDDS()
 	return nil
+}
+
+// moveError explains a refused walk command when arm_sdk is engaged, which
+// can stop the sport service from walking.
+func moveError(err error) error {
+	if armSDKEngaged() {
+		return fmt.Errorf("walk command failed while the arms are engaged through arm_sdk; "+
+			"send an arm component the \"release\" command and retry: %w", err)
+	}
+	return err
 }
