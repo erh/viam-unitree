@@ -18,14 +18,43 @@ and `arm_sdk` takes over the upper body, following Unitree's
 - **Legs** are not commanded, so the balance controller keeps them.
 
 Engaging always starts from the measured pose, so the arms don't jump to old
-targets. Sport-service commands that need the arms or change mode release
-`arm_sdk` first: gestures, `ready_to_move`, `set_fsm_id`, `set_speed_mode`,
-`set_balance_mode`, `try_fsm` and the `g1-mode` switch. The weight ramps to 0,
-then the `rt/arm_sdk` writer closes, because the firmware rejects mode changes
-while it's open. The next arm move engages again.
+targets. Commands that need the arms, or that take torque away from the robot,
+release `arm_sdk` first: gestures, and mode changes to anything but the two
+standing states (damp, zero torque, sit, the start-up sequence, and
+`set_speed_mode`, `set_balance_mode`, `try_fsm`). The weight ramps to 0, then
+the `rt/arm_sdk` writer closes. The next arm move engages again. The module
+releases the same way when it shuts down.
 
-Base moves don't release `arm_sdk`. If the robot refuses to walk while the
-arms are engaged, the base returns an error saying so; send `release` first.
+Changes between the standing states keep the arms engaged, so they go on
+holding their pose and anything in the hands: stand (FSM 4) to walk (200) and
+back, through the `g1-mode` switch, `ready_to_move` or `set_fsm_id`. If the
+robot doesn't take such a change with the arms engaged, the module releases
+them and asks again, and logs that it did.
+
+### Walking with the arms engaged
+
+Base moves don't release `arm_sdk`, so the robot can walk while the arms hold a
+pose, for example to carry something. That needs the right walk mode:
+
+| Mode | FSM | Walks with the arms engaged |
+|------|-----|-----------------------------|
+| Regular (Unitree's "main operation control") | 200 | Yes |
+| Running | 802 | No: it ignores walk commands until the arms are released |
+
+`ready_to_move` and the `g1-mode` switch's "walk" position enter Regular mode
+(from power-up: Damp → StandUp → Start). The robot ignores Start until its
+stand-up has finished, so they ask for up to about 16 s and return an error if
+it never takes it. If the robot is already in Regular mode they do nothing and
+leave the arms engaged. On this firmware Regular mode
+is only accepted from StandUp, and leaving Running mode takes Damp, which
+drops a standing robot. So for a robot in Running mode (set from the remote,
+or by an older version of this module), `ready_to_move` does nothing and
+says so in its reply; with the robot supported, `{"command": "ready_to_move",
+"force": true}` runs the full sequence and ends in Regular mode.
+
+This matches Unitree's teleoperation documentation (arm control alongside
+walking supports only Regular mode) and was confirmed on a G1: walking with
+`arm_sdk` engaged works in FSM 200 and not in 802.
 
 ## Configuration
 
@@ -119,6 +148,9 @@ the gantry that the torso and arms hold better rather than worse, then go to 1.
 - If the robot reports walk mode but is limp, `ready_to_move` sees walk mode and
   does nothing; send `{"command": "ready_to_move", "force": true}` to run the
   full stand-up sequence.
+- If the base doesn't move while the arms are engaged, the robot is probably in
+  Running mode (FSM 802; check with `get_modes`). See
+  [Walking with the arms engaged](#walking-with-the-arms-engaged).
 - `{"command": "motion_mode"}` on the `g1` component (read-only) shows which
   motion controller is running. An empty name means none, and the sport service
   won't answer until one is.
@@ -137,7 +169,6 @@ the gantry that the torso and arms hold better rather than worse, then go to 1.
   G1's built-in arm-action library and don't need arm_sdk. They release
   arm_sdk first, so the arms end wherever the gesture leaves them.
 - Leaving the legs to the balance controller while `arm_sdk` drives the upper
-  body is Unitree's documented design, but it has not yet been confirmed on
-  this firmware. Test with the robot on a gantry or harness: it should keep
-  balancing (small leg corrections, recovering from a gentle push) while an
-  arm moves.
+  body is Unitree's documented design. On a G1 it stood and, in Regular mode,
+  walked with the arms engaged; how well it recovers from pushes or carries a
+  load in that state hasn't been tested.

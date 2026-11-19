@@ -115,7 +115,11 @@ func (b *g1Base) MoveStraight(ctx context.Context, distanceMm int, mmPerSec floa
 		case <-moveCtx.Done():
 			return nil
 		case <-ticker.C:
-			if err := b.loco.Move(vx, 0, 0); err != nil {
+			sent, err := b.refreshMove(moveCtx, vx, 0, 0)
+			if !sent {
+				return nil
+			}
+			if err != nil {
 				b.loco.StopMove()
 				return moveError(err)
 			}
@@ -160,7 +164,11 @@ func (b *g1Base) Spin(ctx context.Context, angleDeg, degsPerSec float64, extra m
 		case <-moveCtx.Done():
 			return nil
 		case <-ticker.C:
-			if err := b.loco.Move(0, 0, vyaw); err != nil {
+			sent, err := b.refreshMove(moveCtx, 0, 0, vyaw)
+			if !sent {
+				return nil
+			}
+			if err != nil {
 				b.loco.StopMove()
 				return moveError(err)
 			}
@@ -254,7 +262,11 @@ func (b *g1Base) startContinuousMove(vx, vy, vyaw float32) error {
 			case <-moveCtx.Done():
 				return
 			case <-ticker.C:
-				if err := b.loco.Move(vx, vy, vyaw); err != nil {
+				sent, err := b.refreshMove(moveCtx, vx, vy, vyaw)
+				if !sent {
+					return
+				}
+				if err != nil {
 					b.logger.Warnf("continuous move failed: %v", moveError(err))
 				}
 			}
@@ -264,13 +276,28 @@ func (b *g1Base) startContinuousMove(vx, vy, vyaw float32) error {
 }
 
 func (b *g1Base) Stop(ctx context.Context, extra map[string]interface{}) error {
+	// StopMove goes out under b.mu, so no refresh can follow it (see refreshMove).
 	b.mu.Lock()
 	b.cancelFn()
+	b.loco.StopMove()
 	b.mu.Unlock()
 
-	b.loco.StopMove()
 	b.moving.Store(false)
 	return nil
+}
+
+// refreshMove re-sends a walk command for a move in progress, unless the move
+// was cancelled. A select with both the cancellation and the ticker ready picks
+// either, and a Move sent after Stop's StopMove restarts walking for a second
+// (each command lasts 1 s). Checking and sending under b.mu, which Stop holds
+// while it cancels and stops, rules that out.
+func (b *g1Base) refreshMove(moveCtx context.Context, vx, vy, vyaw float32) (sent bool, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if moveCtx.Err() != nil {
+		return false, nil
+	}
+	return true, b.loco.Move(vx, vy, vyaw)
 }
 
 func (b *g1Base) IsMoving(ctx context.Context) (bool, error) {
@@ -340,12 +367,13 @@ func (b *g1Base) Close(ctx context.Context) error {
 	return nil
 }
 
-// moveError explains a refused walk command when arm_sdk is engaged, which
-// can stop the sport service from walking.
+// moveError explains a refused walk command when arm_sdk is engaged: Running
+// mode (FSM 802) doesn't walk while arm_sdk holds the arms.
 func moveError(err error) error {
 	if armSDKEngaged() {
-		return fmt.Errorf("walk command failed while the arms are engaged through arm_sdk; "+
-			"send an arm component the \"release\" command and retry: %w", err)
+		return fmt.Errorf("walk command failed while the arms are engaged through arm_sdk. "+
+			"Walking with the arms engaged needs Regular mode (FSM 200, which ready_to_move enters), "+
+			"not Running mode (802); or release the arms with an arm component's \"release\" command: %w", err)
 	}
 	return err
 }

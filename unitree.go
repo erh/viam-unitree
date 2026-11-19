@@ -45,22 +45,24 @@ const (
 
 // G1 FSM (Finite State Machine) IDs used with SetFsmId.
 //
-// Which IDs are honored depends on firmware version. The Unitree Python
-// SDK documents the newer transitional IDs (702=Lie2StandUp,
-// 706=Squat2StandUp, 200=Start), while the older C++ SDK used
-// FsmStandUp=4 and FsmStart=500. This robot's firmware only accepts
-// the legacy ID 4 for stand-up — 706/200/500/702 are silently rejected.
-// Use try_fsm DoCommand to discover which IDs a given firmware honors.
+// Which IDs are honored depends on firmware version, and on the state the
+// robot is in: a request the firmware won't make from the current state returns
+// no error and is ignored. The Unitree Python SDK documents the newer IDs
+// (702=Lie2StandUp, 706=Squat2StandUp, 200=Start), while the older C++ SDK
+// used FsmStandUp=4 and FsmStart=500. On this robot's firmware, stand-up is 4
+// (from Damp), and 200 is accepted only from StandUp (4): requested from 802 it
+// is ignored. Leaving 802 takes Damp. Use the try_fsm DoCommand to discover
+// which IDs a given firmware honors.
 const (
 	FsmZeroTorque    = 0
 	FsmDamp          = 1
 	FsmSquat         = 2
 	FsmSit           = 3
-	FsmStandUp       = 4 // the stand-up transition this firmware honors
-	FsmStart         = 200
+	FsmStandUp       = 4   // the stand-up transition this firmware honors
+	FsmStart         = 200 // Regular mode: walks on Move commands, also while arm_sdk holds the arms
 	FsmLie2StandUp   = 702
 	FsmSquat2StandUp = 706
-	FsmRun           = 802 // walk/run mode — Move commands work here
+	FsmRun           = 802 // Running mode: walks and runs, but ignores Move commands while arm_sdk holds the arms
 )
 
 // Unitree video API IDs.
