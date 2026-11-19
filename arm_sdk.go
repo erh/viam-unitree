@@ -262,6 +262,14 @@ func (a *armSDK) release() {
 	}
 	a.mu.Unlock()
 
+	// Hand the upper body back the way a normal release does: fade the weight
+	// out over a second, then close the writer. A module restart with the arms
+	// engaged used to drop the weight from 1 to 0 in one frame and vanish,
+	// after which the robot was found in zero torque.
+	if err := a.disengage(); err != nil {
+		a.logWarnf("arm_sdk shutdown: %v", err)
+	}
+
 	close(a.stopCh)
 	a.wg.Wait()
 

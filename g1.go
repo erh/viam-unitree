@@ -96,18 +96,16 @@ func (g *g1) executeArmAction(taskID int) error {
 	return g.loco.SetArmTask(taskID)
 }
 
-// readyToMove gets the G1 into a state that accepts Move commands; see
-// runReadyToMove. From power-up the sequence is:
-//   Damp (1) → StandUp (4) → SetBalanceMode(1) → Run (802)
+// readyToMove gets the G1 into walk mode; see runReadyToMove. From power-up
+// the sequence is:
+//   Damp (1) → StandUp (4) → Start (200, Regular mode)
 // A standing or walking robot skips the steps it doesn't need.
 //
-// This is intentionally minimal: one FSM read and at most 4 RPC calls, with
-// sleeps between. Issuing many rapid RPCs (logFsm reads, transitionFsm
-// pre/post checks) creates enough DDS waitset churn on the shared participant
-// to corrupt internal CycloneDDS state and break the videohub (camera) reader.
-// The manual DoCommand equivalents of these 4 calls were verified to leave
-// both walking and camera functional.
-func (g *g1) readyToMove(ctx context.Context, force bool) error {
+// This is intentionally sparse: a few RPC calls with at least a second between
+// them. Issuing many rapid RPCs (logFsm reads, transitionFsm pre/post checks)
+// creates enough DDS waitset churn on the shared participant to corrupt
+// internal CycloneDDS state and break the videohub (camera) reader.
+func (g *g1) readyToMove(ctx context.Context, force bool) (string, error) {
 	return runReadyToMove(ctx, g.loco, g.logger, force)
 }
 
@@ -115,44 +113,56 @@ func (g *g1) readyToMove(ctx context.Context, force bool) error {
 type fsmClient interface {
 	GetFsmID() (int, error)
 	SetFsmID(fsmID int) error
-	SetBalanceMode(mode int) error
 }
 
 // readyToMoveSleep waits between FSM steps; tests replace it.
 var readyToMoveSleep = sleepCtx
 
+// runningModeNote explains why ready_to_move leaves a robot in Running mode.
+const runningModeNote = "the robot is in Running mode (FSM 802): it walks, but ignores walk commands " +
+	"while the arms are engaged. Regular mode (200) is only reachable through Damp and StandUp; " +
+	"with the robot supported, send ready_to_move with force to switch"
+
 // runReadyToMove gets the G1 into walk mode, usable by any component holding a
-// LocoClient (the g1 generic component and the g1-mode switch). It reads the FSM
-// state first and does only what's missing:
-//   - already walking (Run, 802): nothing
-//   - standing (StandUp 4, Start 200): SetBalanceMode(1) → Run
-//   - anything else, or the state can't be read: Damp → StandUp → SetBalanceMode(1) → Run
+// LocoClient (the g1 generic component and the g1-mode switch), and returns a
+// note on what it did. Walk mode is Regular mode (FSM 200): unlike Running mode
+// (802) it keeps taking walk commands while arm_sdk holds the arms, which
+// Unitree documents and was confirmed on this robot. It reads the FSM state
+// first and does only what's missing:
+//   - Regular mode (200): nothing, and the arms stay engaged
+//   - Running mode (802): nothing, with a note; leaving it needs Damp, which
+//     drops a standing robot, so that takes force
+//   - standing (StandUp, 4): Start, keeping the arms engaged
+//   - anything else, or the state can't be read: Damp → StandUp → Start
 //
 // force runs the full sequence whatever the FSM state says: the robot can
-// report walk mode (802) while its motors are off after a fault.
+// report a walk mode while its motors are off after a fault.
 //
 // Damp only belongs to the start-up sequence: from a standing robot it takes the
 // motors to damping, and the robot sags before it stands up again.
-func runReadyToMove(ctx context.Context, loco fsmClient, logger logging.Logger, force bool) error {
-	// The firmware rejects FSM transitions while arm_sdk is open.
-	if err := releaseArmSDK(); err != nil {
-		return fmt.Errorf("release arm_sdk: %w", err)
-	}
-
+func runReadyToMove(ctx context.Context, loco fsmClient, logger logging.Logger, force bool) (string, error) {
 	fsm, err := loco.GetFsmID()
 	switch {
 	case force:
 		logger.Infof("readyToMove: forced; running the full start-up sequence (FSM %d, read error %v)", fsm, err)
 	case err != nil:
 		logger.Warnf("readyToMove: can't read FSM state (%v); running the full start-up sequence", err)
+	case fsm == FsmStart:
+		logger.Info("readyToMove: already in walk mode (Regular, FSM 200)")
+		return "already in walk mode", nil
 	case fsm == FsmRun:
-		logger.Info("readyToMove: already in walk mode")
-		return nil
-	case fsm == FsmStandUp || fsm == FsmStart:
-		logger.Infof("readyToMove: already standing (FSM %d); skipping Damp and StandUp", fsm)
-		return balanceAndRun(ctx, loco, logger)
+		logger.Warnf("readyToMove: %s", runningModeNote)
+		return runningModeNote, nil
+	case fsm == FsmStandUp:
+		logger.Info("readyToMove: already standing (FSM 4); skipping Damp and StandUp")
+		return "entered walk mode from standing", enterRegularMode(ctx, loco, logger)
 	default:
 		logger.Infof("readyToMove: FSM %d; running the full start-up sequence", fsm)
+	}
+
+	// Damp takes the torque away; hand the arms back first.
+	if err := releaseArmSDK(); err != nil {
+		return "", fmt.Errorf("release arm_sdk: %w", err)
 	}
 
 	logger.Info("readyToMove: Damp")
@@ -160,39 +170,99 @@ func runReadyToMove(ctx context.Context, loco fsmClient, logger logging.Logger, 
 		logger.Warnf("readyToMove: Damp RPC error (may already be in state): %v", err)
 	}
 	if err := readyToMoveSleep(ctx, 1*time.Second); err != nil {
-		return err
+		return "", err
 	}
 
 	logger.Info("readyToMove: StandUp")
 	if err := loco.SetFsmID(FsmStandUp); err != nil {
-		return fmt.Errorf("stand_up: %w", err)
+		return "", fmt.Errorf("stand_up: %w", err)
 	}
 	if err := readyToMoveSleep(ctx, 5*time.Second); err != nil {
-		return err
+		return "", err
 	}
-	return balanceAndRun(ctx, loco, logger)
+	return "ran the full start-up sequence", enterRegularMode(ctx, loco, logger)
 }
 
-// balanceAndRun turns on balance mode and enters walk mode from standing.
-func balanceAndRun(ctx context.Context, loco fsmClient, logger logging.Logger) error {
-	logger.Info("readyToMove: SetBalanceMode(1)")
-	if err := loco.SetBalanceMode(1); err != nil {
-		return fmt.Errorf("set_balance_mode: %w", err)
-	}
-	if err := readyToMoveSleep(ctx, 500*time.Millisecond); err != nil {
-		return err
-	}
+// startAttempts is how many times enterRegularMode asks for Regular mode, 2 s
+// apart. The robot ignores the request until its stand-up has finished, which
+// can take longer than the 5 s the sequence waits: on the robot, one request
+// 5 s after StandUp was ignored, and one 20 s later was taken.
+const startAttempts = 8
 
-	logger.Info("readyToMove: Run")
-	if err := loco.SetFsmID(FsmRun); err != nil {
-		return fmt.Errorf("run: %w", err)
+// armsStayEngaged reports whether arm_sdk can stay engaged through a change to
+// the given FSM state: the standing states, where the arms hold their pose (and
+// whatever they carry). Every other state takes torque away or moves the body.
+func armsStayEngaged(fsm int) bool {
+	return fsm == FsmStandUp || fsm == FsmStart
+}
+
+// enterRegularMode enters Regular mode (FSM 200) from StandUp and checks that
+// the robot took it: when it won't make the change, the firmware accepts the
+// request without an error and ignores it. It asks up to startAttempts times,
+// and keeps arm_sdk engaged unless the robot refuses that way twice.
+func enterRegularMode(ctx context.Context, loco fsmClient, logger logging.Logger) error {
+	for attempt := 1; ; attempt++ {
+		logger.Infof("readyToMove: Start (Regular mode, FSM 200), try %d", attempt)
+		if err := loco.SetFsmID(FsmStart); err != nil {
+			return fmt.Errorf("start: %w", err)
+		}
+		if err := readyToMoveSleep(ctx, 1*time.Second); err != nil {
+			return err
+		}
+		fsm, err := loco.GetFsmID()
+		if err == nil && fsm == FsmStart {
+			logger.Info("readyToMove: complete")
+			return nil
+		}
+		if attempt >= startAttempts {
+			if err != nil {
+				return fmt.Errorf("read FSM after start: %w", err)
+			}
+			return fmt.Errorf("the robot didn't enter Regular mode after %d tries: FSM is %d, want %d",
+				attempt, fsm, FsmStart)
+		}
+		if attempt == 2 && armSDKEngaged() {
+			logger.Warn("readyToMove: the robot isn't taking Regular mode with the arms engaged; releasing arm_sdk and retrying")
+			if err := releaseArmSDK(); err != nil {
+				return fmt.Errorf("release arm_sdk: %w", err)
+			}
+		}
+		if err := readyToMoveSleep(ctx, 1*time.Second); err != nil {
+			return err
+		}
+	}
+}
+
+// standUp requests StandUp (FSM 4), where the robot holds a fixed standing
+// pose. From Regular mode with the arms engaged it keeps arm_sdk engaged, so
+// the arms hold their pose; if the robot doesn't take the request that way, it
+// releases the arms and asks again. From other states it releases first: the
+// robot is about to move its whole body to stand.
+func standUp(ctx context.Context, loco fsmClient, logger logging.Logger) error {
+	fsm, err := loco.GetFsmID()
+	if err == nil && fsm == FsmStandUp {
+		return nil
+	}
+	if err != nil || fsm != FsmStart || !armSDKEngaged() {
+		if err := releaseArmSDK(); err != nil {
+			return fmt.Errorf("release arm_sdk: %w", err)
+		}
+		return loco.SetFsmID(FsmStandUp)
+	}
+	if err := loco.SetFsmID(FsmStandUp); err != nil {
+		return err
 	}
 	if err := readyToMoveSleep(ctx, 1*time.Second); err != nil {
 		return err
 	}
-
-	logger.Info("readyToMove: complete")
-	return nil
+	if fsm, err := loco.GetFsmID(); err == nil && fsm == FsmStandUp {
+		return nil
+	}
+	logger.Warn("stand: the robot isn't taking StandUp with the arms engaged; releasing arm_sdk and retrying")
+	if err := releaseArmSDK(); err != nil {
+		return fmt.Errorf("release arm_sdk: %w", err)
+	}
+	return loco.SetFsmID(FsmStandUp)
 }
 
 // transitionFsm issues an FSM-setting command and verifies the firmware
@@ -291,10 +361,18 @@ func (g *g1) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[str
 		return map[string]interface{}{"rc": 0.0, "action_id": float64(taskID)}, nil
 	}
 
-	// Mode and FSM changes go through the sport service, which rejects them
-	// while arm_sdk is open. (Gestures and ready_to_move release on their own.)
+	// Mode changes hand the arms back from arm_sdk first, except changes
+	// between the standing states, where the arms can keep holding their pose.
+	// (Gestures and ready_to_move release on their own.)
+	needsRelease := false
 	switch cmdStr {
-	case "set_fsm_id", "set_speed_mode", "set_balance_mode", "try_fsm":
+	case "set_speed_mode", "set_balance_mode", "try_fsm":
+		needsRelease = true
+	case "set_fsm_id":
+		id, err := numericToInt(cmd["id"])
+		needsRelease = err != nil || !armsStayEngaged(id)
+	}
+	if needsRelease {
 		if err := releaseArmSDK(); err != nil {
 			return map[string]interface{}{"rc": -1.0, "error": "release arm_sdk: " + err.Error()}, nil
 		}
@@ -303,12 +381,15 @@ func (g *g1) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[str
 	switch cmdStr {
 	case "ready_to_move":
 		// "force": true runs the full start-up sequence even if the robot
-		// reports walk mode or standing, e.g. when it says 802 but is limp.
+		// reports walk mode or standing, e.g. when it says 200 but is limp,
+		// or to leave Running mode (802) for Regular mode.
 		force, _ := cmd["force"].(bool)
-		if err := g.readyToMove(ctx, force); err != nil {
+		note, err := g.readyToMove(ctx, force)
+		if err != nil {
+			g.logger.Warnf("ready_to_move failed: %v", err)
 			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
 		}
-		return map[string]interface{}{"rc": 0.0}, nil
+		return map[string]interface{}{"rc": 0.0, "note": note}, nil
 	case "motion_mode":
 		// Read-only: which motion controller is running (empty name: none).
 		if g.motion == nil {

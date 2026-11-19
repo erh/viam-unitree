@@ -38,10 +38,15 @@ var switchModes = []struct {
 	{"zero_torque", FsmZeroTorque, func(ctx context.Context, s *g1Switch) error { return s.loco.SetFsmID(FsmZeroTorque) }},
 	{"damp", FsmDamp, func(ctx context.Context, s *g1Switch) error { return s.loco.SetFsmID(FsmDamp) }},
 	{"sit", FsmSit, func(ctx context.Context, s *g1Switch) error { return s.loco.SetFsmID(FsmSit) }},
-	{"stand", FsmStandUp, func(ctx context.Context, s *g1Switch) error { return s.loco.SetFsmID(FsmStandUp) }},
-	// "walk" runs the full post-boot sequence (Damp → StandUp → BalanceMode(1)
-	// → Run) and lands the FSM in FsmRun (802), which accepts Move commands.
-	{"walk", FsmRun, func(ctx context.Context, s *g1Switch) error { return runReadyToMove(ctx, s.loco, s.logger, false) }},
+	// "stand" keeps the arms engaged when it comes from walk mode; see standUp.
+	{"stand", FsmStandUp, func(ctx context.Context, s *g1Switch) error { return standUp(ctx, s.loco, s.logger) }},
+	// "walk" runs ready_to_move (from power-up: Damp → StandUp → Start) and
+	// lands the FSM in Regular mode (200), which takes Move commands and keeps
+	// walking while arm_sdk holds the arms.
+	{"walk", FsmStart, func(ctx context.Context, s *g1Switch) error {
+		_, err := runReadyToMove(ctx, s.loco, s.logger, false)
+		return err
+	}},
 }
 
 func init() {
@@ -93,17 +98,30 @@ func (s *g1Switch) SetPosition(ctx context.Context, position uint32, extra map[s
 	}
 	m := switchModes[position]
 	s.logger.Infof("g1-mode: SetPosition %d (%s)", position, m.label)
-	// The firmware rejects FSM transitions while arm_sdk is open.
-	if err := releaseArmSDK(); err != nil {
-		return fmt.Errorf("release arm_sdk: %w", err)
+	// Stand and walk manage arm_sdk themselves and keep the arms engaged where
+	// they can. The other positions take torque away from the robot, so the
+	// arms are handed back first.
+	if !armsStayEngaged(m.fsmID) {
+		if err := releaseArmSDK(); err != nil {
+			return fmt.Errorf("release arm_sdk: %w", err)
+		}
 	}
-	return m.apply(ctx, s)
+	if err := m.apply(ctx, s); err != nil {
+		s.logger.Warnf("g1-mode: %s failed: %v", m.label, err)
+		return err
+	}
+	return nil
 }
 
 func (s *g1Switch) GetPosition(ctx context.Context, extra map[string]interface{}) (uint32, error) {
 	fsmID, err := s.loco.GetFsmID()
 	if err != nil {
 		return 0, fmt.Errorf("read FSM id: %w", err)
+	}
+	if fsmID == FsmRun {
+		// Running mode also walks (set from the remote, or by older versions
+		// of this module); show it as "walk".
+		fsmID = FsmStart
 	}
 	for i, m := range switchModes {
 		if m.fsmID == fsmID {
