@@ -93,6 +93,10 @@ func (s *g1Switch) SetPosition(ctx context.Context, position uint32, extra map[s
 	}
 	m := switchModes[position]
 	s.logger.Infof("g1-mode: SetPosition %d (%s)", position, m.label)
+	// The firmware rejects FSM transitions while arm_sdk is open.
+	if err := releaseArmSDK(); err != nil {
+		return fmt.Errorf("release arm_sdk: %w", err)
+	}
 	return m.apply(ctx, s)
 }
 

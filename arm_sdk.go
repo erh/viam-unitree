@@ -73,25 +73,28 @@ type armSDK struct {
 	writer C.dds_entity_t
 	reader C.dds_entity_t
 
-	// commanded holds the most recent target for every arm motor. Each arm
-	// component writes its own slice; the publisher loop sends the union.
+	// commanded holds the target for every motor. arm_sdk drives the upper
+	// body: each arm component writes its own arm slice, and the waist holds
+	// the pose it had when arm_sdk engaged. Legs and motors 30-34 stay zero
+	// (uncommanded), which leaves them to the balance controller.
 	commanded [G1NumMotors]C.unitree_hg_motor_cmd_t
 
-	// weight is the arm_sdk blending weight (motor 29). We hold it at 1.0
-	// while at least one arm is active so arm_sdk fully owns the arms.
+	// weight is the arm_sdk blending weight (motor 29) being published now;
+	// target is where the current or last ramp is heading. target == 0 means
+	// released: once weight reaches 0, the publisher sends a final zero-weight
+	// frame and closes the writer, handing the upper body back to sport.
 	weight float32
+	target float32
+
+	// rampMu serializes engage/release ramps, so an arm move during a
+	// release waits for it and then engages again instead of being lost.
+	rampMu sync.Mutex
 
 	// latestState is updated by the lowstate poller. Reads must hold the
 	// mutex; the value is plain-old-data so we copy it out.
 	latestState   C.unitree_hg_lowstate_t
 	hasState      atomic.Bool
 	lastStateTime time.Time
-
-	// paused gates the LowCmd publish in run(). Set while the G1 generic
-	// component is issuing sport-service FSM transitions: the firmware
-	// silently rejects sport stand-up transitions while rt/arm_sdk is
-	// actively publishing, even with weight=0.
-	paused atomic.Bool
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -102,20 +105,41 @@ var (
 	armSDKInstance *armSDK
 )
 
-// pauseActiveArmSDK looks up the process-wide armSDK singleton (if any)
-// and gates its LowCmd publisher. Returns a resume func; safe to call
-// whether or not an armSDK exists. Intended use: the G1 generic component
-// pauses arm_sdk publishing around sport-service FSM transitions, which
-// the firmware silently rejects while rt/arm_sdk traffic is active.
-func pauseActiveArmSDK() func() {
+// Gains for the upper-body joints arm_sdk holds, from Unitree's
+// g1_arm7_sdk_dds_example. Arm components override the arms' gains with their
+// own kp/kd on their first move.
+const (
+	upperBodyKp = 60
+	upperBodyKd = 1.5
+)
+
+// releaseArmSDK hands the arms and waist back to the sport controller if
+// arm_sdk is engaged, and returns once it has. Sport-service commands that
+// change mode or move the arms (ready_to_move, FSM changes, gestures) need
+// this: while rt/arm_sdk is open the firmware rejects FSM transitions, and a
+// gesture would fight arm_sdk's targets. Safe to call when no arm component
+// exists or arm_sdk is already released.
+func releaseArmSDK() error {
 	armSDKMu.Lock()
 	a := armSDKInstance
 	armSDKMu.Unlock()
 	if a == nil {
-		return func() {}
+		return nil
 	}
-	a.paused.Store(true)
-	return func() { a.paused.Store(false) }
+	return a.disengage()
+}
+
+// armSDKEngaged reports whether arm_sdk is engaged or engaging.
+func armSDKEngaged() bool {
+	armSDKMu.Lock()
+	a := armSDKInstance
+	armSDKMu.Unlock()
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.target > 0 || a.weight > 0
 }
 
 // getArmSDK returns the shared arm SDK singleton, creating it on first use.
@@ -143,20 +167,7 @@ func getArmSDK() (*armSDK, error) {
 		stopCh: make(chan struct{}),
 	}
 
-	// Initialize all motor commands with mode=1 (enabled) and proper
-	// holding gains. Gains are per-motor-type from the official Unitree
-	// g1_dual_arm_example.cpp: GearboxL (knee) kp=100, others kp=40,
-	// all kd=1. For non-arm motors (legs, torso), the q position is
-	// echoed from lowstate each tick in snapshotLocked() so they hold
-	// their current position rather than commanding zero.
-	for i := range a.commanded {
-		a.commanded[i].mode = 1
-		a.commanded[i].kd = 1
-		a.commanded[i].kp = 40
-	}
-	// Knees use GearboxL → higher kp.
-	a.commanded[G1JointLeftKnee].kp = 100
-	a.commanded[G1JointRightKnee].kp = 100
+	a.initCommands()
 
 	// Writer is created lazily in ensureWriter() when weight > 0.
 
@@ -171,6 +182,30 @@ func getArmSDK() (*armSDK, error) {
 
 	armSDKInstance = a
 	return a, nil
+}
+
+// initCommands sets up the commands arm_sdk publishes, following Unitree's
+// g1_arm7_sdk_dds_example: the 17 upper-body motors (waist 12-14 and arms
+// 15-28) are enabled with holding gains, and their targets are seeded from
+// the measured pose each time arm_sdk engages. Every other motor (legs 0-11,
+// 30-34) stays zero, so the balance controller keeps the legs.
+func (a *armSDK) initCommands() {
+	a.commanded = [G1NumMotors]C.unitree_hg_motor_cmd_t{}
+	for i := G1JointWaistYaw; i <= G1JointRightWristYaw; i++ {
+		a.commanded[i].mode = 1
+		a.commanded[i].kp = upperBodyKp
+		a.commanded[i].kd = upperBodyKd
+	}
+}
+
+// seedUpperBodyLocked sets every upper-body target to the measured position,
+// so engaging arm_sdk holds the current pose instead of pulling toward old
+// targets or zero. Caller must hold a.mu.
+func (a *armSDK) seedUpperBodyLocked() {
+	for i := G1JointWaistYaw; i <= G1JointRightWristYaw; i++ {
+		a.commanded[i].q = a.latestState.motor_state[i].q
+		a.commanded[i].dq = 0
+	}
 }
 
 // release decrements the reference count and tears down the shared resources
@@ -242,19 +277,24 @@ func (a *armSDK) ensureWriter() error {
 // rampWeight gradually transitions the arm_sdk weight from its current
 // value to target over duration. This avoids jarring torque spikes when
 // switching between sport and arm_sdk control. Steps at ~50 Hz (20ms).
+// Ramping up from released seeds the upper body from the measured pose.
+// Ramping to 0 releases arm_sdk: the publisher then sends a final
+// zero-weight frame and closes the writer.
 func (a *armSDK) rampWeight(target float32, duration time.Duration) error {
-	a.mu.Lock()
-	start := a.weight
-	a.mu.Unlock()
+	a.rampMu.Lock()
+	defer a.rampMu.Unlock()
 
+	a.mu.Lock()
 	if target > 0 {
-		if !a.hasState.Load() {
-			return fmt.Errorf("cannot engage arm_sdk: no lowstate received yet")
-		}
-		if err := a.ensureWriterLocked(); err != nil {
+		if err := a.engageLocked(target); err != nil {
+			a.mu.Unlock()
 			return err
 		}
+	} else {
+		a.target = 0
 	}
+	start := a.weight
+	a.mu.Unlock()
 
 	steps := int(duration / (20 * time.Millisecond))
 	if steps < 1 {
@@ -271,19 +311,29 @@ func (a *armSDK) rampWeight(target float32, duration time.Duration) error {
 	return nil
 }
 
-// ensureWriterLocked creates the DDS writer if not already created.
-// NOT locked — caller must handle locking if needed, or call outside lock.
-func (a *armSDK) ensureWriterLocked() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.ensureWriter()
+// engageLocked prepares arm_sdk to publish toward target > 0: it needs
+// lowstate, seeds the upper body when starting from released (weight 0), and
+// opens the writer. Caller must hold a.mu.
+func (a *armSDK) engageLocked(target float32) error {
+	if !a.hasState.Load() {
+		return fmt.Errorf("cannot engage arm_sdk: no lowstate received yet")
+	}
+	if a.weight == 0 {
+		a.seedUpperBodyLocked()
+	}
+	if err := a.ensureWriter(); err != nil {
+		return err
+	}
+	a.target = target
+	return nil
 }
 
-// setWeight sets the arm_sdk blending weight (0..1). When non-zero, arm_sdk
-// motor commands override the sport controller for the arm joints.
-// The first call with w > 0 lazily creates the DDS writer on rt/arm_sdk.
-// Requires lowstate data to be available so leg positions can be echoed.
+// setWeight sets the arm_sdk blending weight (0..1) at once. When non-zero,
+// arm_sdk motor commands override the sport controller for the upper body;
+// 0 releases arm_sdk.
 func (a *armSDK) setWeight(w float32) error {
+	a.rampMu.Lock()
+	defer a.rampMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if w < 0 {
@@ -292,40 +342,54 @@ func (a *armSDK) setWeight(w float32) error {
 		w = 1
 	}
 	if w > 0 {
-		if !a.hasState.Load() {
-			return fmt.Errorf("cannot engage arm_sdk: no lowstate received yet")
-		}
-		if err := a.ensureWriter(); err != nil {
+		if err := a.engageLocked(w); err != nil {
 			return err
 		}
+	} else {
+		a.target = 0
 	}
 	a.weight = w
 	return nil
 }
 
-// ensureEngaged ramps the arm_sdk weight up to 1 if the arms are currently
-// dormant, after seeding every arm joint setpoint from the latest measured
-// positions so engaging holds the current pose instead of snapping to zero.
-// It is a no-op once already engaged, so it is safe to call on every move —
-// this is what lets UI joint-jogging work without a manual "engage" first.
+// ensureEngaged ramps the arm_sdk weight up to 1 if arm_sdk is released or
+// releasing, holding the current pose (see engageLocked). It is a no-op once
+// engaged or engaging, so it is safe to call on every move: this is what lets
+// UI joint-jogging work without a manual "engage" first. During a release it
+// waits for the release to finish, then engages again.
 func (a *armSDK) ensureEngaged() error {
 	a.mu.Lock()
-	engaged := a.weight > 0
+	engaged := a.target > 0
 	a.mu.Unlock()
 	if engaged {
 		return nil
 	}
-	if !a.hasState.Load() {
-		return fmt.Errorf("cannot engage arm_sdk: no lowstate received yet")
-	}
-	// Seed both arms to their current measured positions so the handoff holds
-	// pose rather than jerking toward q=0.
-	a.mu.Lock()
-	for idx := G1JointLeftShoulderPitch; idx <= G1JointRightWristYaw; idx++ {
-		a.commanded[idx].q = a.latestState.motor_state[idx].q
-	}
-	a.mu.Unlock()
 	return a.rampWeight(1, 1*time.Second)
+}
+
+// disengage fades arm_sdk out and waits until the publisher has sent the
+// final zero-weight frame and closed the writer, so sport-service commands
+// that follow aren't rejected.
+func (a *armSDK) disengage() error {
+	a.mu.Lock()
+	idle := a.target == 0 && a.weight == 0 && a.writer == 0
+	a.mu.Unlock()
+	if idle {
+		return nil
+	}
+	if err := a.rampWeight(0, 1*time.Second); err != nil {
+		return err
+	}
+	for deadline := time.Now().Add(1 * time.Second); time.Now().Before(deadline); {
+		a.mu.Lock()
+		closed := a.writer == 0
+		a.mu.Unlock()
+		if closed {
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return fmt.Errorf("arm_sdk did not release within 1s")
 }
 
 // jointPosition returns the latest measured position of the given motor
@@ -361,10 +425,10 @@ func (a *armSDK) jointPositions(indices []int) ([]float32, bool) {
 }
 
 // run is the publish/poll loop. Reads LowState every 20 ms. Publishes
-// LowCmd only when arm_sdk is actively driving the arms (weight > 0) —
-// any publishing on rt/arm_sdk, even at weight=0, puts the G1 firmware
-// into low-level control mode and makes the sport service refuse all
-// RPCs with status=7301. Staying silent when dormant lets sport retain
+// LowCmd only while arm_sdk is engaged (weight > 0), plus one final
+// zero-weight frame on release, after which the writer is closed: an open
+// rt/arm_sdk writer, even at weight=0, makes the sport service refuse FSM
+// transitions (status 7301). Staying silent when released lets sport retain
 // full control of the robot.
 func (a *armSDK) run() {
 	defer a.wg.Done()
@@ -378,26 +442,29 @@ func (a *armSDK) run() {
 			// publish a final weight=0 frame so the firmware ramps back
 			// to sport-owned arms before we go silent.
 			a.mu.Lock()
-			wasActive := a.weight > 0 && a.writer != 0
+			writer := a.writer
+			wasActive := a.weight > 0 && writer != 0
 			a.weight = 0
+			a.target = 0
 			a.commanded[G1ArmSDKWeightIndex].q = 0
 			cmd := a.snapshotLocked()
 			a.mu.Unlock()
 			if wasActive {
-				C.unitree_dds_publish_lowcmd(a.writer, &cmd)
+				C.unitree_dds_publish_lowcmd(writer, &cmd)
 			}
 			return
 		case <-ticker.C:
 		}
 
 		a.mu.Lock()
-		a.commanded[G1ArmSDKWeightIndex].q = C.float(a.weight)
-		active := a.weight > 0
-		cmd := a.snapshotLocked()
+		cmd, writer, closeAfter := a.nextFrameLocked()
 		a.mu.Unlock()
 
-		if active && !a.paused.Load() && a.writer != 0 {
-			C.unitree_dds_publish_lowcmd(a.writer, &cmd)
+		if writer != 0 {
+			C.unitree_dds_publish_lowcmd(writer, &cmd)
+		}
+		if closeAfter {
+			C.unitree_dds_close_writer(writer)
 		}
 
 		var ls C.unitree_hg_lowstate_t
@@ -411,12 +478,36 @@ func (a *armSDK) run() {
 	}
 }
 
+// nextFrameLocked builds this tick's LowCmd and returns the writer to publish
+// it on (0: publish nothing) and whether to close that writer afterwards.
+// While engaged it publishes every tick. Once a release has brought the
+// weight to 0, it publishes one final zero-weight frame and closes the writer
+// (clearing a.writer, so the next engage opens a new one). Caller must hold
+// a.mu.
+func (a *armSDK) nextFrameLocked() (cmd C.unitree_hg_lowcmd_t, writer C.dds_entity_t, closeAfter bool) {
+	a.commanded[G1ArmSDKWeightIndex].q = C.float(a.weight)
+	cmd = a.snapshotLocked()
+	switch {
+	case a.writer == 0:
+		return cmd, 0, false
+	case a.weight > 0:
+		return cmd, a.writer, false
+	case a.target == 0:
+		writer = a.writer
+		a.writer = 0
+		return cmd, writer, true
+	default:
+		// Engaging, before the first ramp step: nothing to publish yet.
+		return cmd, 0, false
+	}
+}
+
 // snapshotLocked builds a LowCmd from the current commanded array. Caller
 // must hold a.mu. mode_pr and mode_machine are echoed from the latest
 // LowState (required by firmware — sending 0 causes body to drop into
-// safety mode). For non-arm motors (legs, torso), current positions are
-// echoed from lowstate so they hold steady under the weight blend.
-// CRC32 is computed over the entire struct.
+// safety mode). Upper-body targets are fixed between moves rather than
+// echoed from lowstate: a target that follows the measured position has no
+// stiffness, so the joint sags. CRC32 is computed over the entire struct.
 func (a *armSDK) snapshotLocked() C.unitree_hg_lowcmd_t {
 	var cmd C.unitree_hg_lowcmd_t
 
@@ -428,23 +519,6 @@ func (a *armSDK) snapshotLocked() C.unitree_hg_lowcmd_t {
 
 	for i := 0; i < G1NumMotors; i++ {
 		cmd.motor_cmd[i] = a.commanded[i]
-	}
-
-	// For non-arm motors (legs 0-14, and motors 30-34): echo current position
-	// from lowstate so that when weight > 0 the firmware holds these joints at
-	// their current position rather than commanding them to q=0 with zero
-	// torque. This is REQUIRED on this firmware: leaving the legs uncommanded
-	// (mode=0) does NOT keep them under the locomotion controller — the body
-	// drops to zero torque and the torso collapses. (An earlier attempt to
-	// command only the arms, per the official arm_sdk example, caused exactly
-	// that on-hardware, so we keep echoing the legs here.)
-	if a.hasState.Load() {
-		for i := 0; i < G1JointLeftShoulderPitch; i++ {
-			cmd.motor_cmd[i].q = a.latestState.motor_state[i].q
-		}
-		for i := G1ArmSDKWeightIndex + 1; i < G1NumMotors; i++ {
-			cmd.motor_cmd[i].q = a.latestState.motor_state[i].q
-		}
 	}
 
 	// CRC32 over the entire struct excluding the crc field itself.

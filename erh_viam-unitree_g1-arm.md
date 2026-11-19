@@ -6,9 +6,26 @@ from `rt/lowstate`. The two models share the same underlying `arm_sdk`
 publisher (singleton) and use disjoint motor-index slices: indices 15..21 for
 the left arm, 22..28 for the right.
 
-When at least one arm component is configured, motor 29's "weight" field is
-held at 1.0 so `arm_sdk` fully overrides sport-mode arm motion. The DoCommand
-`release` resets it to 0 to hand the arms back to the sport controller.
+### Who controls the arms
+
+`arm_sdk` starts released, leaving the whole robot to the sport controller.
+The first arm move engages it: motor 29's "weight" ramps to 1.0 over a second
+and `arm_sdk` takes over the upper body, following Unitree's
+`g1_arm7_sdk_dds_example`:
+
+- **Arms** go where the arm components command them.
+- **Waist** (yaw, roll, pitch) holds the pose it had when `arm_sdk` engaged.
+- **Legs** are not commanded, so the balance controller keeps them.
+
+Engaging always starts from the measured pose, so the arms don't jump to old
+targets. Sport-service commands that need the arms or change mode release
+`arm_sdk` first: gestures, `ready_to_move`, `set_fsm_id`, `set_speed_mode`,
+`set_balance_mode`, `try_fsm` and the `g1-mode` switch. The weight ramps to 0,
+then the `rt/arm_sdk` writer closes, because the firmware rejects mode changes
+while it's open. The next arm move engages again.
+
+Base moves don't release `arm_sdk`. If the robot refuses to walk while the
+arms are engaged, the base returns an error saying so; send `release` first.
 
 ## Configuration
 
@@ -51,9 +68,9 @@ Both arms expose 7 DoF in shoulder-to-wrist order:
 
 | Command       | Description                                                                  |
 |---------------|------------------------------------------------------------------------------|
-| `engage`      | Set arm_sdk weight to 1.0 (arm_sdk fully owns the arms).                     |
-| `release`     | Set arm_sdk weight to 0.0 (sport mode reclaims the arms).                    |
-| `set_weight`  | Set arm_sdk weight to a custom value 0..1; takes a `weight` numeric arg.     |
+| `engage`      | Ramp arm_sdk weight to 1.0, holding the current pose (arm moves do this automatically). |
+| `release`     | Ramp arm_sdk weight to 0.0 and close the writer (the sport controller reclaims the upper body). |
+| `set_weight`  | Set arm_sdk weight to a custom value 0..1 at once; takes a `weight` numeric arg. |
 
 ## Notes / Caveats
 
@@ -64,4 +81,10 @@ Both arms expose 7 DoF in shoulder-to-wrist order:
 - Tune `kp` / `kd` for the specific G1 variant in use.
 - For pre-recorded arm gestures (wave, hug, hands-up, etc.) use the generic
   `erh:viam-unitree:g1` component's DoCommand interface — those run on the
-  G1's built-in arm-action library and don't need arm_sdk.
+  G1's built-in arm-action library and don't need arm_sdk. They release
+  arm_sdk first, so the arms end wherever the gesture leaves them.
+- Leaving the legs to the balance controller while `arm_sdk` drives the upper
+  body is Unitree's documented design, but it has not yet been confirmed on
+  this firmware. Test with the robot on a gantry or harness: it should keep
+  balancing (small leg corrections, recovering from a gentle push) while an
+  arm moves.
