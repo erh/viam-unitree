@@ -250,6 +250,14 @@ int unitree_dds_write_request(dds_entity_t writer,
                               int64_t req_id, int64_t api_id,
                               const char *params_json);
 
+/* Same as unitree_dds_write_request, plus a binary payload (e.g. PCM audio
+ * for the voice service). The payload is serialized by dds_write, so the
+ * caller's buffer only needs to stay valid for the duration of the call. */
+int unitree_dds_write_request_binary(dds_entity_t writer,
+                                     int64_t req_id, int64_t api_id,
+                                     const char *params_json,
+                                     const uint8_t *data, uint32_t len);
+
 /* Read a Response_ from the given reader (blocking up to timeout_ms).
    On success, sets *out to the response. Caller must call unitree_response_free(). */
 int unitree_dds_read_response(dds_entity_t reader, int timeout_ms,

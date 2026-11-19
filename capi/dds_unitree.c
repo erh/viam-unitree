@@ -465,6 +465,14 @@ int unitree_dds_create_rpc(const char *service_name,
 int unitree_dds_write_request(dds_entity_t writer,
                               int64_t req_id, int64_t api_id,
                               const char *params_json) {
+    return unitree_dds_write_request_binary(writer, req_id, api_id,
+                                            params_json, NULL, 0);
+}
+
+int unitree_dds_write_request_binary(dds_entity_t writer,
+                                     int64_t req_id, int64_t api_id,
+                                     const char *params_json,
+                                     const uint8_t *data, uint32_t len) {
     unitree_request_t req;
     memset(&req, 0, sizeof(req));
     req.identity_id = req_id;
@@ -473,9 +481,9 @@ int unitree_dds_write_request(dds_entity_t writer,
     req.policy_priority = 0;
     req.policy_noreply = 0;
     req.parameter = (char *)params_json;
-    req.binary._maximum = 0;
-    req.binary._length = 0;
-    req.binary._buffer = NULL;
+    req.binary._maximum = len;
+    req.binary._length = len;
+    req.binary._buffer = (uint8_t *)data;
 
     dds_return_t rc = dds_write(writer, &req);
     return (rc == DDS_RETCODE_OK) ? 0 : -1;
