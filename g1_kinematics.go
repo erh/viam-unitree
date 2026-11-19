@@ -44,8 +44,9 @@ type urdfJoint struct {
 	Origin urdfXYZ `xml:"origin"`
 	Axis   urdfXYZ `xml:"axis"`
 	Limit  struct {
-		Lower float64 `xml:"lower,attr"`
-		Upper float64 `xml:"upper,attr"`
+		Lower  float64 `xml:"lower,attr"`
+		Upper  float64 `xml:"upper,attr"`
+		Effort float64 `xml:"effort,attr"` // the motor's rated torque, N·m
 	} `xml:"limit"`
 }
 

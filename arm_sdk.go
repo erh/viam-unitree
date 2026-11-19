@@ -9,10 +9,13 @@ import "C"
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
+
+	"go.viam.com/rdk/logging"
 )
 
 // G1 joint indices in the unitree_hg motor array (35 motors total).
@@ -90,6 +93,25 @@ type armSDK struct {
 	// release waits for it and then engages again instead of being lost.
 	rampMu sync.Mutex
 
+	// gravityScale is how much of the modeled gravity torque the upper-body
+	// commands carry as feedforward: 0 off, 1 the full model (gravity.go).
+	gravityScale float64
+
+	// logger reports engage/release, motor error codes and lowstate gaps, so
+	// a fault can be traced to what arm_sdk was doing. Nil in tests.
+	logger logging.Logger
+	// lastMotorCode and lastCodeLog track each motor's error code from
+	// lowstate, to log changes (at most once a second per motor).
+	lastMotorCode [G1NumMotors]uint32
+	lastCodeLog   [G1NumMotors]time.Time
+	// stateStale is set while lowstate has stopped arriving.
+	stateStale bool
+	// safetyRelease is set while arm_sdk fades out because the robot tipped.
+	safetyRelease bool
+	// lastYieldLog and lastTorqueLog rate-limit those warnings per motor.
+	lastYieldLog  [G1NumMotors]time.Time
+	lastTorqueLog [G1NumMotors]time.Time
+
 	// latestState is updated by the lowstate poller. Reads must hold the
 	// mutex; the value is plain-old-data so we copy it out.
 	latestState   C.unitree_hg_lowstate_t
@@ -111,6 +133,22 @@ var (
 const (
 	upperBodyKp = 60
 	upperBodyKd = 1.5
+)
+
+// Safety limits while arm_sdk drives the upper body.
+const (
+	// maxEngagedTilt is how far the pelvis may tip from upright (15°) before
+	// arm_sdk releases, and refuses to engage: past it the robot is falling or
+	// hanging in a harness, and holding the waist rigid fights whatever holds it.
+	maxEngagedTilt = 15 * math.Pi / 180
+	// safetyReleaseStep is the weight drop per 20 ms tick in a safety release
+	// (0.2 s from full weight).
+	safetyReleaseStep = 0.1
+	// waistYield is how far (rad) a waist joint may be pushed off its hold
+	// before the target follows it, capping the hold at kp × 0.15 = 9 N·m.
+	waistYield = 0.15
+	// torqueWarnShare logs commands above this share of a motor's rated torque.
+	torqueWarnShare = 0.8
 )
 
 // releaseArmSDK hands the arms and waist back to the sport controller if
@@ -150,7 +188,7 @@ func armSDKEngaged() bool {
 // enter low-level mode, which blocks all sport-service FSM transitions.
 // By deferring writer creation, the sport service stays functional
 // until the arms are actively needed.
-func getArmSDK() (*armSDK, error) {
+func getArmSDK(logger logging.Logger) (*armSDK, error) {
 	armSDKMu.Lock()
 	defer armSDKMu.Unlock()
 
@@ -162,9 +200,11 @@ func getArmSDK() (*armSDK, error) {
 	}
 
 	a := &armSDK{
-		refs:   1,
-		weight: 0,
-		stopCh: make(chan struct{}),
+		refs:         1,
+		weight:       0,
+		gravityScale: 1,
+		logger:       logger,
+		stopCh:       make(chan struct{}),
 	}
 
 	a.initCommands()
@@ -294,7 +334,14 @@ func (a *armSDK) rampWeight(target float32, duration time.Duration) error {
 		a.target = 0
 	}
 	start := a.weight
+	scale := a.gravityScale
 	a.mu.Unlock()
+	switch {
+	case target > 0 && start == 0:
+		a.logInfof("arm_sdk engaging: holding the current upper-body pose (gravity compensation scale %.2f)", scale)
+	case target == 0 && start > 0:
+		a.logInfof("arm_sdk releasing from weight %.2f", start)
+	}
 
 	steps := int(duration / (20 * time.Millisecond))
 	if steps < 1 {
@@ -304,6 +351,11 @@ func (a *armSDK) rampWeight(target float32, duration time.Duration) error {
 		t := float32(i) / float32(steps)
 		w := start + (target-start)*t
 		a.mu.Lock()
+		if a.target != target {
+			// A safety release took over; let it finish.
+			a.mu.Unlock()
+			return fmt.Errorf("arm_sdk released for safety: the pelvis tilted past %.0f°", maxEngagedTilt*180/math.Pi)
+		}
 		a.weight = w
 		a.mu.Unlock()
 		time.Sleep(20 * time.Millisecond)
@@ -317,6 +369,10 @@ func (a *armSDK) rampWeight(target float32, duration time.Duration) error {
 func (a *armSDK) engageLocked(target float32) error {
 	if !a.hasState.Load() {
 		return fmt.Errorf("cannot engage arm_sdk: no lowstate received yet")
+	}
+	if tilt := a.tiltLocked(); tilt > maxEngagedTilt {
+		return fmt.Errorf("not engaging arm_sdk: the pelvis is tilted %.0f° (limit %.0f°); stand the robot upright first",
+			tilt*180/math.Pi, maxEngagedTilt*180/math.Pi)
 	}
 	if a.weight == 0 {
 		a.seedUpperBodyLocked()
@@ -457,24 +513,133 @@ func (a *armSDK) run() {
 		}
 
 		a.mu.Lock()
-		cmd, writer, closeAfter := a.nextFrameLocked()
+		cmd, writer, closeAfter, events := a.nextFrameLocked()
 		a.mu.Unlock()
+		for _, e := range events {
+			a.logWarnf("%s", e)
+		}
 
 		if writer != 0 {
 			C.unitree_dds_publish_lowcmd(writer, &cmd)
 		}
 		if closeAfter {
 			C.unitree_dds_close_writer(writer)
+			a.logInfof("arm_sdk released: sent a zero-weight frame and closed the writer")
 		}
 
+		now := time.Now()
 		var ls C.unitree_hg_lowstate_t
 		if rc := C.unitree_dds_take_lowstate(a.reader, 0, &ls); rc == 0 {
 			a.mu.Lock()
+			if a.stateStale {
+				a.stateStale = false
+				a.logInfof("rt/lowstate resumed after %v", now.Sub(a.lastStateTime).Round(time.Millisecond))
+			}
 			a.latestState = ls
-			a.lastStateTime = time.Now()
+			a.lastStateTime = now
+			events := a.motorCodeEventsLocked(now)
 			a.mu.Unlock()
 			a.hasState.Store(true)
+			for _, e := range events {
+				a.logWarnf("%s", e)
+			}
+		} else if a.hasState.Load() {
+			a.mu.Lock()
+			if !a.stateStale && now.Sub(a.lastStateTime) > time.Second {
+				a.stateStale = true
+				a.logWarnf("no rt/lowstate for %v (arm_sdk weight %.2f): the motion controller may have stopped or restarted",
+					now.Sub(a.lastStateTime).Round(time.Millisecond), a.weight)
+			}
+			a.mu.Unlock()
 		}
+	}
+}
+
+// motorCodeEventsLocked compares each motor's error code in the latest lowstate
+// with the last one seen and describes the changes, at most once a second per
+// motor. The first lowstate reports every nonzero code. Caller must hold a.mu.
+func (a *armSDK) motorCodeEventsLocked(now time.Time) []string {
+	var events []string
+	for i := range g1MotorJoints {
+		m := a.latestState.motor_state[i]
+		code := uint32(m.motorstate)
+		if code == a.lastMotorCode[i] {
+			continue
+		}
+		if now.Sub(a.lastCodeLog[i]) >= time.Second {
+			events = append(events, fmt.Sprintf(
+				"motor %d (%s) error code 0x%x -> 0x%x: temperature %d/%d C, estimated torque %.1f N·m, q %.3f rad; arm_sdk weight %.2f, gravity scale %.2f",
+				i, g1MotorJoints[i], a.lastMotorCode[i], code, int(m.temperature[0]), int(m.temperature[1]),
+				float64(m.tau_est), float64(m.q), a.weight, a.gravityScale))
+			a.lastCodeLog[i] = now
+		}
+		a.lastMotorCode[i] = code
+	}
+	return events
+}
+
+// motorStatusReport returns the latest rt/lowstate per motor (angle, velocity,
+// estimated torque, temperatures, error code), the IMU attitude, and arm_sdk's
+// state. It needs an arm or body component, which own the lowstate reader.
+func motorStatusReport() (map[string]interface{}, error) {
+	armSDKMu.Lock()
+	a := armSDKInstance
+	armSDKMu.Unlock()
+	if a == nil {
+		return nil, fmt.Errorf("no g1 arm or body component is running; they read rt/lowstate")
+	}
+	if !a.hasState.Load() {
+		return nil, fmt.Errorf("no rt/lowstate received yet")
+	}
+	round := func(v float64, places float64) float64 {
+		f := math.Pow(10, places)
+		return math.Round(v*f) / f
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	motors := map[string]interface{}{}
+	var faults []interface{}
+	for i, name := range g1MotorJoints {
+		m := a.latestState.motor_state[i]
+		code := uint32(m.motorstate)
+		motors[name] = map[string]interface{}{
+			"index":         float64(i),
+			"mode":          float64(m.mode),
+			"q_rad":         round(float64(m.q), 4),
+			"dq_rad_s":      round(float64(m.dq), 3),
+			"tau_est_nm":    round(float64(m.tau_est), 2),
+			"temperature_c": []interface{}{float64(m.temperature[0]), float64(m.temperature[1])},
+			"voltage":       round(float64(m.vol), 1),
+			"error_code":    fmt.Sprintf("0x%x", code),
+		}
+		if code != 0 {
+			faults = append(faults, name)
+		}
+	}
+	rpy := a.latestState.imu_state.rpy
+	return map[string]interface{}{
+		"motors":           motors,
+		"motors_with_code": faults,
+		"imu_rpy_rad":      []interface{}{round(float64(rpy[0]), 4), round(float64(rpy[1]), 4), round(float64(rpy[2]), 4)},
+		"lowstate_age_ms":  float64(time.Since(a.lastStateTime).Milliseconds()),
+		"arm_sdk": map[string]interface{}{
+			"weight":        round(float64(a.weight), 2),
+			"target":        round(float64(a.target), 2),
+			"writer_open":   a.writer != 0,
+			"gravity_scale": a.gravityScale,
+		},
+	}, nil
+}
+
+func (a *armSDK) logInfof(format string, args ...interface{}) {
+	if a.logger != nil {
+		a.logger.Infof(format, args...)
+	}
+}
+
+func (a *armSDK) logWarnf(format string, args ...interface{}) {
+	if a.logger != nil {
+		a.logger.Warnf(format, args...)
 	}
 }
 
@@ -484,22 +649,155 @@ func (a *armSDK) run() {
 // weight to 0, it publishes one final zero-weight frame and closes the writer
 // (clearing a.writer, so the next engage opens a new one). Caller must hold
 // a.mu.
-func (a *armSDK) nextFrameLocked() (cmd C.unitree_hg_lowcmd_t, writer C.dds_entity_t, closeAfter bool) {
+//
+// While engaged it also applies the safety limits, returning a description of
+// each for the log: it releases if the pelvis tips past maxEngagedTilt, lets
+// the waist yield when forced off its hold, and flags commands near a motor's
+// rated torque.
+func (a *armSDK) nextFrameLocked() (cmd C.unitree_hg_lowcmd_t, writer C.dds_entity_t, closeAfter bool, events []string) {
+	now := time.Now()
+	if a.hasState.Load() && (a.target > 0 || a.weight > 0) {
+		if tilt := a.tiltLocked(); tilt > maxEngagedTilt && a.target > 0 {
+			a.target = 0
+			a.safetyRelease = true
+			events = append(events, fmt.Sprintf("pelvis tilted %.0f° (limit %.0f°): releasing arm_sdk",
+				tilt*180/math.Pi, maxEngagedTilt*180/math.Pi))
+		}
+		if a.safetyRelease {
+			a.weight = float32(math.Max(0, float64(a.weight)-safetyReleaseStep))
+		}
+		events = append(events, a.yieldWaistLocked(now)...)
+	}
+
 	a.commanded[G1ArmSDKWeightIndex].q = C.float(a.weight)
 	cmd = a.snapshotLocked()
+	if a.weight > 0 {
+		events = append(events, a.torqueWarningsLocked(&cmd, now)...)
+	}
 	switch {
 	case a.writer == 0:
-		return cmd, 0, false
+		return cmd, 0, false, events
 	case a.weight > 0:
-		return cmd, a.writer, false
+		return cmd, a.writer, false, events
 	case a.target == 0:
 		writer = a.writer
 		a.writer = 0
-		return cmd, writer, true
+		a.safetyRelease = false
+		return cmd, writer, true, events
 	default:
 		// Engaging, before the first ramp step: nothing to publish yet.
-		return cmd, 0, false
+		return cmd, 0, false, events
 	}
+}
+
+// tiltLocked returns the pelvis tilt from upright, in radians, from the IMU.
+// Caller must hold a.mu.
+func (a *armSDK) tiltLocked() float64 {
+	q := a.latestState.imu_state.quaternion
+	return pelvisTilt(float64(q[0]), float64(q[1]), float64(q[2]), float64(q[3]))
+}
+
+// yieldWaistLocked moves each waist target to within waistYield of where the
+// joint is, so a waist pushed off its hold (by the harness, the legs, or a
+// person) isn't fought with ever more torque. Caller must hold a.mu.
+func (a *armSDK) yieldWaistLocked(now time.Time) []string {
+	var events []string
+	for i := G1JointWaistYaw; i <= G1JointWaistPitch; i++ {
+		measured := float64(a.latestState.motor_state[i].q)
+		target := float64(a.commanded[i].q)
+		if math.Abs(target-measured) <= waistYield {
+			continue
+		}
+		a.commanded[i].q = C.float(measured + math.Copysign(waistYield, target-measured))
+		if now.Sub(a.lastYieldLog[i]) >= 5*time.Second {
+			a.lastYieldLog[i] = now
+			events = append(events, fmt.Sprintf("%s pushed %.2f rad off its hold; the hold now follows it",
+				g1MotorJoints[i], measured-target))
+		}
+	}
+	return events
+}
+
+// torqueWarningsLocked flags upper-body motors whose commanded torque (the
+// position hold plus gravity feedforward) is above torqueWarnShare of the
+// motor's rated torque, at most every 5 s per motor. Caller must hold a.mu.
+func (a *armSDK) torqueWarningsLocked(cmd *C.unitree_hg_lowcmd_t, now time.Time) []string {
+	model, err := upperBodyGravityModel()
+	if err != nil {
+		return nil
+	}
+	var events []string
+	for i := G1JointWaistYaw; i <= G1JointRightWristYaw; i++ {
+		m, s := cmd.motor_cmd[i], a.latestState.motor_state[i]
+		torque := float64(m.kp)*float64(m.q-s.q) - float64(m.kd)*float64(s.dq) + float64(m.tau)
+		rated := model.effort[i]
+		if rated <= 0 || math.Abs(torque) <= torqueWarnShare*rated || now.Sub(a.lastTorqueLog[i]) < 5*time.Second {
+			continue
+		}
+		a.lastTorqueLog[i] = now
+		events = append(events, fmt.Sprintf("%s commanded %.1f N·m, %.0f%% of its %.0f N·m rating (hold %.1f, gravity %.1f)",
+			g1MotorJoints[i], torque, 100*math.Abs(torque)/rated, rated, torque-float64(m.tau), float64(m.tau)))
+	}
+	return events
+}
+
+// gravityTorquesLocked returns the feedforward torques that hold the measured
+// upper-body pose against gravity, scaled by gravityScale and capped per joint
+// (see gravity.go). ok is false when there is nothing to send: no lowstate yet,
+// compensation off, or no model. Caller must hold a.mu.
+func (a *armSDK) gravityTorquesLocked() (tau [G1NumMotors]float64, ok bool) {
+	if !a.hasState.Load() || a.gravityScale <= 0 {
+		return tau, false
+	}
+	model, err := upperBodyGravityModel()
+	if err != nil {
+		return tau, false
+	}
+	var q [G1NumMotors]float64
+	for i := range q {
+		q[i] = float64(a.latestState.motor_state[i].q)
+	}
+	imu := a.latestState.imu_state.quaternion
+	gravity := pelvisGravity(float64(imu[0]), float64(imu[1]), float64(imu[2]), float64(imu[3]))
+	tau = model.holdingTorques(&q, gravity)
+	for i := G1JointWaistYaw; i <= G1JointRightWristYaw; i++ {
+		limit := model.torqueLimit(i)
+		tau[i] = math.Max(-limit, math.Min(limit, a.gravityScale*tau[i]))
+	}
+	return tau, true
+}
+
+// setGravityScale sets how much of the modeled gravity torque is sent: 0 turns
+// compensation off, 1 is the full model.
+func (a *armSDK) setGravityScale(scale float64) error {
+	if scale < 0 || scale > 1.5 || math.IsNaN(scale) {
+		return fmt.Errorf("gravity compensation scale must be between 0 and 1.5, got %v", scale)
+	}
+	a.mu.Lock()
+	old := a.gravityScale
+	a.gravityScale = scale
+	a.mu.Unlock()
+	a.logInfof("gravity compensation scale %.2f -> %.2f", old, scale)
+	return nil
+}
+
+// gravityStatus returns the gravity compensation scale and, for each upper-body
+// joint, the feedforward torque it adds at the current pose (N·m).
+func (a *armSDK) gravityStatus() (float64, map[string]float64, error) {
+	if !a.hasState.Load() {
+		return 0, nil, fmt.Errorf("no lowstate received yet")
+	}
+	if _, err := upperBodyGravityModel(); err != nil {
+		return 0, nil, fmt.Errorf("gravity model: %w", err)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	tau, _ := a.gravityTorquesLocked()
+	torques := map[string]float64{}
+	for i := G1JointWaistYaw; i <= G1JointRightWristYaw; i++ {
+		torques[g1MotorJoints[i]] = math.Round(tau[i]*100) / 100
+	}
+	return a.gravityScale, torques, nil
 }
 
 // snapshotLocked builds a LowCmd from the current commanded array. Caller
@@ -519,6 +817,14 @@ func (a *armSDK) snapshotLocked() C.unitree_hg_lowcmd_t {
 
 	for i := 0; i < G1NumMotors; i++ {
 		cmd.motor_cmd[i] = a.commanded[i]
+	}
+
+	// Hold the upper body against gravity: feedforward torque, so the joints
+	// don't have to sag off their targets before kp pushes back.
+	if tau, ok := a.gravityTorquesLocked(); ok {
+		for i := G1JointWaistYaw; i <= G1JointRightWristYaw; i++ {
+			cmd.motor_cmd[i].tau = C.float(tau[i])
+		}
 	}
 
 	// CRC32 over the entire struct excluding the crc field itself.

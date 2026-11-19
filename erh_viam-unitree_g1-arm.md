@@ -71,6 +71,59 @@ Both arms expose 7 DoF in shoulder-to-wrist order:
 | `engage`      | Ramp arm_sdk weight to 1.0, holding the current pose (arm moves do this automatically). |
 | `release`     | Ramp arm_sdk weight to 0.0 and close the writer (the sport controller reclaims the upper body). |
 | `set_weight`  | Set arm_sdk weight to a custom value 0..1 at once; takes a `weight` numeric arg. |
+| `gravity_compensation` | Read the gravity compensation scale and each upper-body joint's feedforward torque at the current pose (`torque_nm`). Pass `scale` (0 off, 1 full model, up to 1.5) to change it. Shared by both arms. |
+
+## Gravity compensation
+
+A position hold only pushes back once a joint has moved off its target, so
+weight shows up as droop: two arms reaching forward (7 kg) lean the waist about
+15° at kp 60, and the shoulders sag below their targets. While `arm_sdk` is
+engaged, each waist and arm command also carries the torque gravity puts on
+that joint, as feedforward (`tau`), so the joints hold their targets.
+
+The torque comes from the masses and centers of mass in the embedded URDF
+(16.9 kg above the waist), the measured joint angles, and the pelvis tilt from
+the IMU in `rt/lowstate`, recomputed every 20 ms. It's capped at half of each
+motor's rated torque from the URDF: waist roll and pitch 17.5 N·m, waist yaw 44,
+shoulders, elbows and wrist roll 12.5, wrist pitch and yaw 2.5. Anything the
+hands hold isn't in the model, so heavy objects still droop.
+
+### Safety limits
+
+While `arm_sdk` drives the upper body, the module also:
+
+- **Releases if the robot tips:** if the pelvis tilts more than 15° from upright
+  (falling, or hanging in a harness), `arm_sdk` fades out over 0.2 s and hands
+  the upper body back to the sport controller. It won't engage while tilted.
+- **Lets the waist give way:** if a waist joint is pushed more than 0.15 rad off
+  its hold, the hold follows it, capping the position hold at about 9 N·m
+  instead of fighting harder. (A waist roll motor, rated 35 N·m, faulted when
+  the robot hung tilted in a harness with the waist held rigid.)
+- **Logs heavy commands:** any upper-body motor commanded above 80% of its
+  rated torque is logged with the hold and gravity parts.
+
+It's on by default (scale 1). On a robot running it for the first time, set
+`{"command": "gravity_compensation", "scale": 0.5}` before moving an arm, check on
+the gantry that the torso and arms hold better rather than worse, then go to 1.
+`scale: 0` turns it off. The scale resets to 1 when the module restarts.
+
+## Troubleshooting
+
+- The module logs when `arm_sdk` engages and releases, gravity scale changes,
+  any change in a motor's error code from `rt/lowstate` (with its temperature
+  and estimated torque), and gaps of over a second in `rt/lowstate`. Check
+  these logs first when the robot goes limp.
+- `{"command": "motor_status"}` on the `erh:viam-unitree:g1` component (read-only)
+  returns every motor's angle, estimated torque, temperatures and error code,
+  the IMU attitude, and `arm_sdk`'s weight, writer and gravity scale.
+- If the robot reports walk mode but is limp, `ready_to_move` sees walk mode and
+  does nothing; send `{"command": "ready_to_move", "force": true}` to run the
+  full stand-up sequence.
+- `{"command": "motion_mode"}` on the `g1` component (read-only) shows which
+  motion controller is running. An empty name means none, and the sport service
+  won't answer until one is.
+- A motor fault (an error code in `motor_status`) disables every motor and stays
+  latched; power-cycle the robot to clear it, then `ready_to_move`.
 
 ## Notes / Caveats
 

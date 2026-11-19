@@ -189,7 +189,7 @@ func newG1Arm(ctx context.Context, conf resource.Config, logger logging.Logger, 
 		return nil, fmt.Errorf("DDS init: %w", err)
 	}
 
-	sdk, err := getArmSDK()
+	sdk, err := getArmSDK(logger)
 	if err != nil {
 		ShutdownDDS()
 		return nil, fmt.Errorf("arm_sdk client: %w", err)
@@ -473,6 +473,28 @@ func (a *g1Arm) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
 		}
 		return map[string]interface{}{"rc": 0.0}, nil
+	case "gravity_compensation":
+		// Reads, or with "scale" sets, the feedforward that holds the waist and
+		// arms against gravity (shared by both arms): 0 off, 1 the full model.
+		// Returns the torque each upper-body joint gets at the current pose.
+		if raw, ok := cmd["scale"]; ok {
+			scale, err := numericToFloat(raw)
+			if err != nil {
+				return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+			}
+			if err := a.sdk.setGravityScale(scale); err != nil {
+				return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+			}
+		}
+		scale, torques, err := a.sdk.gravityStatus()
+		if err != nil {
+			return map[string]interface{}{"rc": -1.0, "error": err.Error()}, nil
+		}
+		torqueNm := map[string]interface{}{}
+		for name, t := range torques {
+			torqueNm[name] = t
+		}
+		return map[string]interface{}{"rc": 0.0, "scale": scale, "torque_nm": torqueNm}, nil
 	case "":
 		return map[string]interface{}{}, nil
 	default:
