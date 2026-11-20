@@ -18,6 +18,7 @@ func main() {
 		resource.APIModel{API: base.API, Model: g1BaseModel},
 		resource.APIModel{API: camera.API, Model: g1CameraModel},
 		resource.APIModel{API: camera.API, Model: g1LidarModel},
+		resource.APIModel{API: camera.API, Model: g1DepthModel},
 		resource.APIModel{API: generic.API, Model: g1Model},
 		resource.APIModel{API: toggleswitch.API, Model: g1SwitchModel},
 		resource.APIModel{API: powersensor.API, Model: g1BatteryModel},
