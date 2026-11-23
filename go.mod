@@ -7,8 +7,8 @@ require (
 	github.com/kellydunn/golang-geo v0.7.0
 	github.com/pkg/errors v0.9.1
 	go.uber.org/multierr v1.11.0
-	go.viam.com/api v0.1.606
-	go.viam.com/rdk v1.17.0
+	go.viam.com/api v0.1.607
+	go.viam.com/rdk v1.17.1-0.20261123192418-7c1886fc0196
 )
 
 require (
