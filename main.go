@@ -7,6 +7,7 @@ import (
 	"go.viam.com/rdk/components/base"
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/components/generic"
+	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/components/movementsensor"
 	"go.viam.com/rdk/components/powersensor"
 	toggleswitch "go.viam.com/rdk/components/switch"
@@ -27,6 +28,7 @@ func main() {
 		resource.APIModel{API: arm.API, Model: g1RightArmModel},
 		resource.APIModel{API: arm.API, Model: g1BodyModel},
 		resource.APIModel{API: movementsensor.API, Model: g1MovementSensorModel},
+		resource.APIModel{API: gripper.API, Model: g1HandModel},
 		resource.APIModel{API: audioout.API, Model: g1SpeakerModel},
 	)
 }
