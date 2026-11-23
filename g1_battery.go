@@ -11,8 +11,9 @@ import (
 
 // g1-battery exposes the G1's battery management state as a power_sensor.
 // It reads the hg BmsState_ message the G1 publishes on "rt/lf/bmsstate"
-// (the hg LowState has no battery field). Voltage/Current/Power come through
-// the native power_sensor API; SOC/SOH/temperature/cycle come through Readings.
+// (the hg LowState has no battery field). Voltage/Current/Power and state of
+// charge (BatteryPercent) come through the native power_sensor API;
+// SOH/temperature/cycle come through Readings.
 var g1BatteryModel = resource.NewModel("erh", "viam-unitree", "g1-battery")
 
 type g1BatteryConfig struct {
@@ -97,6 +98,20 @@ func (b *g1Battery) Power(ctx context.Context, extra map[string]interface{}) (fl
 		return 0, err
 	}
 	return st.Voltage * st.Current, nil
+}
+
+// BatteryPercent returns the remaining battery charge as a percentage from 0 to 100.
+func (b *g1Battery) BatteryPercent(ctx context.Context, extra map[string]interface{}) (float64, error) {
+	st, err := b.bms.Latest()
+	if err != nil {
+		return 0, err
+	}
+	return float64(st.SOC), nil
+}
+
+// Properties reports that this power sensor supports battery percent (state of charge).
+func (b *g1Battery) Properties(ctx context.Context, extra map[string]interface{}) (*powersensor.Properties, error) {
+	return &powersensor.Properties{IsBatteryPercentSupported: true}, nil
 }
 
 // Readings surfaces the fields the power_sensor API can't: state of charge,

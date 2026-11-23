@@ -167,6 +167,12 @@ func (c *RPCClient) Close() {
 // match the request we just sent, until the matching one arrives or the
 // total timeout elapses.
 func (c *RPCClient) Call(apiID int64, paramsJSON string, timeoutMs int) (string, []byte, error) {
+	return c.CallBinary(apiID, paramsJSON, nil, timeoutMs)
+}
+
+// CallBinary is Call with a binary request payload, which some services read
+// alongside the JSON parameters (the voice service takes PCM audio this way).
+func (c *RPCClient) CallBinary(apiID int64, paramsJSON string, payload []byte, timeoutMs int) (string, []byte, error) {
 	reqID := c.nextID.Add(1)
 
 	cParams := C.CString(paramsJSON)
@@ -175,7 +181,12 @@ func (c *RPCClient) Call(apiID int64, paramsJSON string, timeoutMs int) (string,
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	rc := C.unitree_dds_write_request(c.writer, C.int64_t(reqID), C.int64_t(apiID), cParams)
+	var payloadPtr *C.uint8_t
+	if len(payload) > 0 {
+		payloadPtr = (*C.uint8_t)(unsafe.Pointer(&payload[0]))
+	}
+	rc := C.unitree_dds_write_request_binary(c.writer, C.int64_t(reqID), C.int64_t(apiID),
+		cParams, payloadPtr, C.uint32_t(len(payload)))
 	if rc != 0 {
 		return "", nil, fmt.Errorf("write request failed (api=%d rc=%d)", apiID, rc)
 	}

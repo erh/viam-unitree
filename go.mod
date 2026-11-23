@@ -7,8 +7,8 @@ require (
 	github.com/kellydunn/golang-geo v0.7.0
 	github.com/pkg/errors v0.9.1
 	go.uber.org/multierr v1.11.0
-	go.viam.com/api v0.1.606
-	go.viam.com/rdk v1.17.0
+	go.viam.com/api v0.1.607
+	go.viam.com/rdk v1.17.1-0.20261123192418-7c1886fc0196
 )
 
 require (
@@ -54,7 +54,7 @@ require (
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/bgentry/go-netrc v0.0.0-20140422174119-9fd32a8b3d3d // indirect
-	github.com/blackjack/webcam v0.6.2 // indirect
+	github.com/blackjack/webcam v0.6.2
 	github.com/bluenviron/gortsplib/v4 v4.8.0 // indirect
 	github.com/bufbuild/protocompile v0.14.2-0.20260605203730-cd7c3c124e10 // indirect
 	github.com/bytedance/sonic v1.15.0 // indirect

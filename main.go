@@ -3,6 +3,7 @@ package main
 
 import (
 	"go.viam.com/rdk/components/arm"
+	"go.viam.com/rdk/components/audioout"
 	"go.viam.com/rdk/components/base"
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/components/generic"
@@ -19,6 +20,7 @@ func main() {
 		resource.APIModel{API: base.API, Model: g1BaseModel},
 		resource.APIModel{API: camera.API, Model: g1CameraModel},
 		resource.APIModel{API: camera.API, Model: g1LidarModel},
+		resource.APIModel{API: camera.API, Model: g1DepthModel},
 		resource.APIModel{API: generic.API, Model: g1Model},
 		resource.APIModel{API: toggleswitch.API, Model: g1SwitchModel},
 		resource.APIModel{API: powersensor.API, Model: g1BatteryModel},
@@ -27,5 +29,6 @@ func main() {
 		resource.APIModel{API: arm.API, Model: g1BodyModel},
 		resource.APIModel{API: movementsensor.API, Model: g1MovementSensorModel},
 		resource.APIModel{API: gripper.API, Model: g1HandModel},
+		resource.APIModel{API: audioout.API, Model: g1SpeakerModel},
 	)
 }
